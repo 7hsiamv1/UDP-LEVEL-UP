@@ -2245,7 +2245,7 @@ def load_accounts():
 
 async def main():
     print_colored("=" * 60, Colors.CYAN)
-    print_colored("    TEAM 84FF - FreeFire Level Up Bot (Web Dashboard Mode)", Colors.GREEN)
+    print_colored("    7H SIAM - FreeFire Level Up Bot (Web Dashboard Mode)", Colors.GREEN)
     print_colored("   Persistent Device ID + TRUE Parallel + Smart DNS", Colors.WHITE)
     print_colored("=" * 60, Colors.CYAN)
     print_info(f"Start Match Interval: {START_MATCH_INTERVAL}s")
