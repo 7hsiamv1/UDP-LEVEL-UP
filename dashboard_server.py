@@ -1,11 +1,8 @@
 # dashboard_server.py
 """
 Per-user isolated dashboard + stats pusher for Railway.
-Every 20s: syncs workers + pushes stats back to PHP.
 """
 import asyncio
-import json
-import os
 import time
 import traceback
 from typing import Dict, List, Any, Optional
@@ -48,13 +45,15 @@ class BotState:
             pass
 
     def register_account(self, user_id: int, bot_id: int, uid: str, nickname: str,
-                         region: str, level: int, exp: int, likes: int = 0):
+                         region: str, level: int, exp: int, likes: int = 0,
+                         login_uid: str = ""):
         k = self._key(user_id, bot_id)
         self.account_meta[k] = {"user_id": user_id, "bot_id": bot_id}
         if k not in self.accounts:
             self.accounts[k] = {
                 "user_id": user_id, "bot_id": bot_id,
-                "uid": uid, "nickname": nickname or f"Player_{uid[:6]}",
+                "uid": uid, "login_uid": login_uid,
+                "nickname": nickname or f"Player_{uid[:6]}",
                 "region": region or "BD", "level": level or 1,
                 "initial_exp": exp, "current_exp": exp, "gained_exp": 0,
                 "likes": likes or 0, "status": "ONLINE",
@@ -62,12 +61,13 @@ class BotState:
                 "last_match_time": None,
                 "last_updated": time.strftime("%H:%M:%S"),
             }
-            print(f"[REGISTER] NEW user={user_id} bot={bot_id} uid={uid} nickname={nickname}")
+            print(f"[REGISTER] NEW user={user_id} bot={bot_id} server_uid={uid} login_uid={login_uid} nickname={nickname}")
         else:
             a = self.accounts[k]
             if nickname: a["nickname"] = nickname
             if region: a["region"] = region
             if level: a["level"] = level
+            if login_uid: a["login_uid"] = login_uid
             a["current_exp"] = exp
             a["gained_exp"] = max(0, exp - a["initial_exp"])
             a["likes"] = likes
@@ -107,7 +107,8 @@ class BotState:
             return
         payload = {
             "nickname":        a["nickname"],
-            "account_id":      a.get("uid"),   # server UID
+            "account_id":      a.get("uid"),          # server UID from MajorLogin
+            "login_uid":       a.get("login_uid"),    # guest UID user entered
             "level":           a["level"],
             "initial_exp":     a["initial_exp"],
             "current_exp":     a["current_exp"],
@@ -118,8 +119,9 @@ class BotState:
             "active_matches":  a["active_matches"],
             "last_match_time": a["last_match_time"],
         }
-        print(f"[PUSH-STATS] user={user_id} bot={bot_id} uid={a.get('uid')} "
-              f"status={a['status']} gained={a['gained_exp']} matches={a['matches_played']}")
+        print(f"[PUSH-STATS] user={user_id} bot={bot_id} server_uid={a.get('uid')} "
+              f"login_uid={a.get('login_uid')} status={a['status']} "
+              f"gained={a['gained_exp']} matches={a['matches_played']}")
         await web_api.report_stats(bot_id, payload)
 
 
@@ -132,7 +134,7 @@ _sync_lock = asyncio.Lock()
 
 async def _sync_loop():
     from Main import account_loop_guest, account_loop_token
-    await asyncio.sleep(3)  # wait for Main.py init
+    await asyncio.sleep(3)
 
     while True:
         cycle_start = time.time()
@@ -220,13 +222,13 @@ async def _sync_loop():
 
 
 # ==================== DEBUG HTTP SERVER ====================
-async def handle_root(request: web.Request) -> web.Response:
+async def handle_root(request):
     return web.Response(text="7H SIAM Bot Engine Running")
 
-async def handle_health(request: web.Request) -> web.Response:
+async def handle_health(request):
     return web.Response(text="OK")
 
-async def handle_stats(request: web.Request) -> web.Response:
+async def handle_stats(request):
     return web.json_response({
         "total_workers":  len(bot_state.account_workers),
         "total_accounts": len(bot_state.accounts),
