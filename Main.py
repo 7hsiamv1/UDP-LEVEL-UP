@@ -38,17 +38,22 @@ WEB_HOST = "0.0.0.0"
 WEB_PORT = int(os.environ.get("PORT", "20335"))
 ACCOUNTS_FILE = "accounts.json"
 TOKEN_CACHE_FILE = "token_cache.json"
-DEVICES_FILE = "devices.json"  # 🔥 NEW: Persistent device storage
+DEVICES_FILE = "devices.json"
 TOKEN_CACHE_TTL = 1200
 
 # 🔥 Match control
-START_MATCH_INTERVAL = 1
-NEW_MATCH_DELAY = 3.0   
+START_MATCH_INTERVAL = 3.0              # নিরাপদ ব্যবধান (প্যাকেট স্প্যাম রোধ)
+NEW_MATCH_DELAY = 3.0                   # প্রতিটি নতুন ম্যাচের মাঝে ন্যূনতম অফলাইন বিরতি
 MAX_MATCH_DURATION = 1500
-MATCH_IDLE_TIMEOUT = 2
+MATCH_IDLE_TIMEOUT = 5.0                # UDP ম্যাচ সেশনের স্বাভাবিক আইডল সময়
 MODE_ID = 1
 MAP_ID = 1
-PRIORITY_REGIONS = ["BD","IND", "SG", "TH", "PH", "VN", "MY", "ID", "HK", "TW"]
+PRIORITY_REGIONS = ["BD", "IND", "SG", "TH", "PH", "VN", "MY", "ID", "HK", "TW"]
+
+# 🛑 স্মার্ট অ্যান্টি-ফ্যাটিগ সিস্টেম কনফিগারেশন
+FATIGUE_MATCH_THRESHOLD = 20            # প্রতি ২০টি ম্যাচ কিউ হওয়ার পর বিরতি
+FATIGUE_REST_MIN = 90.0                 # ন্যূনতম ১.৫ মিনিট (৯০ সেকেন্ড)
+FATIGUE_REST_MAX = 150.0                # সর্বোচ্চ ২.৫ মিনিট (১৫০ সেকেন্ড)
 
 # 🔥 Cache invalidation thresholds
 MAX_CONSECUTIVE_PARSE_FAILURES = 5.0     
@@ -575,7 +580,7 @@ async def decode_protobuf(data):
     parsed_results_dict = await parse_results(parsed_results)
     return json.dumps(parsed_results_dict)
 
-async def build_majorlogin_payload(open_id, access_token, platform, client_version, device_info=None, verr=None):
+async def build_majorlogin_payload(open_id, access_token, platform, client_version, device_info=None, verr=None, region="BD"):
     try:
         if verr is None:
             verr = client_version
@@ -586,7 +591,7 @@ async def build_majorlogin_payload(open_id, access_token, platform, client_versi
         proto.client_version = str(verr)
         proto.client_version_code = "2019121229"
         
-        # 🔥 FIXED: Using static hardware profiles from lvl_2.py to avoid ExtraInfo signature mismatch
+        # হার্ডওয়্যার প্রোফাইল যা ExtraInfo সিগনেচারের সাথে সংগতিপূর্ণ
         proto.system_software = "Android OS 15 / API-35 (AP3A.240905.015.A2/185014)"
         proto.system_hardware = "Handheld"
         proto.device_type = "Handheld"
@@ -599,7 +604,9 @@ async def build_majorlogin_payload(open_id, access_token, platform, client_versi
         proto.gpu_version = "OpenGL ES 3.2 v1.r49p1-04eac0.2848c17a2fd4e9340e06555168eaa3c9"
         proto.unique_device_id = "Google|f744e396-5694-4e65-995d-97a958f2bd1f"
         proto.client_ip = "197.0.137.129"
-        proto.language = "pt-br"
+        
+        # 🔥 রিজিয়ন অনুযায়ী সঠিক ভাষা নির্ধারণ
+        proto.language = REGION_LANG.get(str(region).upper(), "en")
         
         proto.open_id = str(open_id)
         proto.open_id_type = str(platform)
@@ -868,7 +875,6 @@ async def start_game_battle_royale(region, client_version, writer, key, iv):
     hex_length = hex(packet_length)[2:]
     hex_length = hex_length if len(hex_length) > 1 else "0" + hex_length
     
-    # 🔥 FIXED: Dynamically map correct packet prefix using lvl.py logic
     reg = str(region).upper() if region else "BD"
     reg_prefix = REGION_PREFIX.get(reg, "031500")
     final_packet = reg_prefix + "0" * (6 - len(hex_length)) + hex_length + encrypted_packet
@@ -1418,11 +1424,11 @@ async def play_game(server_ip_port, thunder, sharma, udp_key, match_code,
 
 
 # ============================================================
-# 🔥 functional_br — TRUE Parallel + Smart Cache + DNS
+# 🔥 functional_br — TRUE Parallel Matches + DNS + TCP Keepalive + Anti-Fatigue
 # ============================================================
 async def functional_br(addrs, starter_packet, account_region, client_version,
-                                key, iv, account_id="", account_data=None,
-                                max_reconnects=10):
+                        key, iv, account_id="", account_data=None,
+                        max_reconnects=10):
     reconnects = 0
     ip, port = addrs.split(":")
     play_matches: List[asyncio.Task] = []
@@ -1430,6 +1436,7 @@ async def functional_br(addrs, starter_packet, account_region, client_version,
     search_attempts = 0
     last_start_time = 0.0
     uid_str = str(account_id)
+    matches_queued_in_session = 0
 
     consecutive_parse_failures = 0
 
@@ -1441,6 +1448,7 @@ async def functional_br(addrs, starter_packet, account_region, client_version,
     try:
         while True:
             writer = None
+            gw_ping_task = None
             try:
                 if current_account_data:
                     fresh = None
@@ -1491,6 +1499,20 @@ async def functional_br(addrs, starter_packet, account_region, client_version,
                 except Exception:
                     pass
 
+                # টিসিপি গেটওয়ে ব্যাকগ্রাউন্ড কিপ-অ্যালাইভ লুপ
+                async def gateway_keepalive_loop():
+                    ka_data = await send_keep_alive(account_region)
+                    while True:
+                        await asyncio.sleep(10)
+                        try:
+                            if writer and not writer.is_closing():
+                                writer.write(ka_data)
+                                await writer.drain()
+                        except Exception:
+                            break
+
+                gw_ping_task = asyncio.create_task(gateway_keepalive_loop())
+
                 print_success(f"[FUNCTIONAL] TCP Gateway Connected for UID: {uid_str} (DNS: {resolved_ip})")
                 reconnects = 0
                 no_response_count = 0
@@ -1499,7 +1521,7 @@ async def functional_br(addrs, starter_packet, account_region, client_version,
                 async def send_start_match():
                     nonlocal search_attempts, last_start_time
                     search_attempts += 1
-                    current_region = "BD"
+                    current_region = account_region or "BD"
                     print_info(f"[BR] Sending StartMatch #{search_attempts} region: {current_region}")
                     try:
                         await asyncio.sleep(random.uniform(0.3, 0.6))
@@ -1520,6 +1542,7 @@ async def functional_br(addrs, starter_packet, account_region, client_version,
                 await send_start_match()
 
                 while True:
+                    # চলমান ব্যাকগ্রাউন্ড ম্যাচ পর্যবেক্ষণ
                     play_matches[:] = [m for m in play_matches if not m.done()]
 
                     active_count = await _get_match_count(uid_str)
@@ -1558,7 +1581,7 @@ async def functional_br(addrs, starter_packet, account_region, client_version,
 
                     if hex_data.startswith("0300") and packet_length >= 300:
                         print_colored("=" * 60, Colors.GREEN)
-                        print_colored(f"MATCH FOUND! Loading...", Colors.GREEN)
+                        print_colored("MATCH FOUND! Loading...", Colors.GREEN)
                         print_colored("=" * 60, Colors.GREEN)
 
                         try:
@@ -1611,6 +1634,7 @@ async def functional_br(addrs, starter_packet, account_region, client_version,
                                     f"UID active: {match_index} | Total: {total}"
                                 )
 
+                                # 🔥 আনলিমিটেড প্যারালাল ম্যাচ এক্সিকিউশন
                                 new_match = asyncio.create_task(
                                     play_game(
                                         server_ip_port,
@@ -1619,7 +1643,7 @@ async def functional_br(addrs, starter_packet, account_region, client_version,
                                         udp_key,
                                         match_code,
                                         effective_acc_id,
-                                        "BD",
+                                        account_region,
                                         client_version,
                                         current_key,
                                         current_iv,
@@ -1629,18 +1653,37 @@ async def functional_br(addrs, starter_packet, account_region, client_version,
                                 play_matches.append(new_match)
 
                                 consecutive_parse_failures = 0
+                                matches_queued_in_session += 1
 
+                                if gw_ping_task:
+                                    gw_ping_task.cancel()
                                 try:
                                     writer.close()
                                     await writer.wait_closed()
                                 except Exception:
                                     pass
 
-                                print_info(
-                                    f"[OFFLINE] {NEW_MATCH_DELAY}s offline → "
-                                    f"reload token → new StartMatch"
-                                )
-                                await asyncio.sleep(NEW_MATCH_DELAY)
+                                # 🛑 স্মার্ট অ্যান্টি-ফ্যাটিগ রেস্ট লজিক (ব্যাকগ্রাউন্ড ম্যাচগুলো নির্বিঘ্নে চলতে থাকবে)
+                                if matches_queued_in_session >= FATIGUE_MATCH_THRESHOLD:
+                                    rest_time = random.uniform(FATIGUE_REST_MIN, FATIGUE_REST_MAX)
+                                    print_colored(
+                                        f"☕ [REST] একটানা {matches_queued_in_session}টি ম্যাচ শুরু হয়েছে। "
+                                        f"বট ডিটেকশন এড়াতে {rest_time:.1f}s নতুন ম্যাচ খোঁজা বন্ধ রাখা হচ্ছে...",
+                                        Colors.WARNING
+                                    )
+                                    try:
+                                        bot_state.update_status(uid_str, "RESTING", len(play_matches))
+                                    except Exception:
+                                        pass
+                                    await asyncio.sleep(rest_time)
+                                    matches_queued_in_session = 0
+                                else:
+                                    print_info(
+                                        f"[OFFLINE] {NEW_MATCH_DELAY}s offline → "
+                                        f"reload token → new StartMatch"
+                                    )
+                                    await asyncio.sleep(NEW_MATCH_DELAY)
+
                                 reconnects = 0
                                 break 
 
@@ -1667,6 +1710,8 @@ async def functional_br(addrs, starter_packet, account_region, client_version,
                                             pass
                                     consecutive_parse_failures = 0
 
+                                if gw_ping_task:
+                                    gw_ping_task.cancel()
                                 try:
                                     writer.close()
                                     await writer.wait_closed()
@@ -1688,6 +1733,8 @@ async def functional_br(addrs, starter_packet, account_region, client_version,
                                     except Exception:
                                         pass
                                 consecutive_parse_failures = 0
+                            if gw_ping_task:
+                                gw_ping_task.cancel()
                             try:
                                 writer.close()
                                 await writer.wait_closed()
@@ -1700,6 +1747,8 @@ async def functional_br(addrs, starter_packet, account_region, client_version,
                         continue
 
             except asyncio.CancelledError:
+                if gw_ping_task:
+                    gw_ping_task.cancel()
                 print_warning(f"[FUNCTIONAL] Cancelled — cancelling {len(play_matches)} UDP matches")
                 for m in play_matches:
                     if not m.done():
@@ -1710,6 +1759,8 @@ async def functional_br(addrs, starter_packet, account_region, client_version,
                 raise
             except Exception as e:
                 print_error(f"[FUNCTIONAL] TCP state ({uid_str}): {e}")
+                if gw_ping_task:
+                    gw_ping_task.cancel()
 
                 play_matches[:] = [m for m in play_matches if not m.done()]
 
@@ -1762,7 +1813,6 @@ async def informational(addrs, starter_packet, key, iv, region="BD", max_reconne
             await writer.drain()
             reconnects = 0
 
-            # Initial keepalive right after connecting
             try:
                 init_ka = await send_keep_alive(region)
                 if init_ka and writer and not writer.is_closing():
@@ -1877,7 +1927,7 @@ async def process_account_uid_pass(uid: str, password: str, intended_region="BD"
         bot_state.register_account(
             uid=acc_id,
             nickname=cached.get('nickname', f"Player_{acc_id}"),
-            region=cached.get('region', 'BD'),
+            region=cached.get('region', intended_region),
             level=cached.get('level', 1),
             exp=cached.get('exp', 0),
             likes=cached.get('likes', 0)
@@ -1901,8 +1951,9 @@ async def process_account_uid_pass(uid: str, password: str, intended_region="BD"
             
         open_id, access_token, platform = tokengrant_response
         
-        # 🔥 Generating fixed payload strictly identical to lvl_2.py 
-        login_payload_data = await build_majorlogin_payload(open_id, access_token, platform, client_version, None)
+        login_payload_data = await build_majorlogin_payload(
+            open_id, access_token, platform, client_version, None, region=intended_region
+        )
         if login_payload_data is None:
             print_error(f"Failed to build login payload for UID {uid}")
             return None
@@ -1928,7 +1979,7 @@ async def process_account_uid_pass(uid: str, password: str, intended_region="BD"
         exp = int(get_proto_field(dict_res, 7, 0))
         likes = int(get_proto_field(dict_res, 8, 0))
         nickname = res_proto.nickname or get_proto_field(dict_res, 4, f"Player_{acc_id}")
-        region = majorlogin_response.region or get_proto_field(dict_res, 3, "BD")
+        region = majorlogin_response.region or get_proto_field(dict_res, 3, intended_region)
 
         bot_state.register_account(uid=acc_id, nickname=nickname, region=region, level=level, exp=exp, likes=likes)
 
@@ -1980,7 +2031,7 @@ async def process_account_token(access_token: str, intended_region="BD") -> Opti
         bot_state.register_account(
             uid=acc_id,
             nickname=cached.get('nickname', f"Player_{acc_id}"),
-            region=cached.get('region', 'BD'),
+            region=cached.get('region', intended_region),
             level=cached.get('level', 1),
             exp=cached.get('exp', 0),
             likes=cached.get('likes', 0)
@@ -2016,7 +2067,9 @@ async def process_account_token(access_token: str, intended_region="BD") -> Opti
         if not open_id:
             return None
 
-        login_payload_data = await build_majorlogin_payload(open_id, access_token, str(platform), client_version, None)
+        login_payload_data = await build_majorlogin_payload(
+            open_id, access_token, str(platform), client_version, None, region=intended_region
+        )
         if not login_payload_data:
             return None
 
@@ -2043,7 +2096,7 @@ async def process_account_token(access_token: str, intended_region="BD") -> Opti
         exp = int(get_proto_field(dict_res, 7, 0))
         likes = int(get_proto_field(dict_res, 8, 0))
         nickname = res_proto.nickname or get_proto_field(dict_res, 4, f"Player_{acc_id}")
-        region = majorlogin_response.region or get_proto_field(dict_res, 3, "BD")
+        region = majorlogin_response.region or get_proto_field(dict_res, 3, intended_region)
 
         bot_state.register_account(uid=acc_id, nickname=nickname, region=region, level=level, exp=exp, likes=likes)
 
@@ -2074,7 +2127,6 @@ async def process_account_token(access_token: str, intended_region="BD") -> Opti
             'client_version': client_version,
             'server_url': majorlogin_response.url,
             'login_payload_data': login_payload_data,
-            'platform': platform,
             'auth_type': 'token',
             'auth_token': access_token
         }
@@ -2171,7 +2223,6 @@ async def account_loop_guest(uid: str, password: str, region="BD"):
             except Exception:
                 pass
             
-            # 🔥 Pass region directly to ensure BD config is used
             account_data = await process_account_uid_pass(uid, password, region)
             
             if not account_data:
@@ -2188,10 +2239,6 @@ async def account_loop_guest(uid: str, password: str, region="BD"):
             await asyncio.sleep(3)
         except asyncio.CancelledError:
             print_warning(f"Worker for {uid} stopped.")
-            try:
-                bot_state.update_status(str(uid), "OFFLINE")
-            except Exception:
-                pass
             break
         except Exception as e:
             print_error(f"Error for UID {uid}: {e}. Retrying in 10s...")
@@ -2252,7 +2299,8 @@ async def main():
     print_info(f"Offline Wait: {NEW_MATCH_DELAY}s (after match found)")
     print_info(f"Non-match Reconnect: {NON_MATCH_RECONNECT_DELAY}s")
     print_info(f"Cache Invalidation Threshold: {MAX_CONSECUTIVE_PARSE_FAILURES}x")
-    print_info(f"Parallel Matches: UNLIMITED (background)")
+    print_info("Parallel Matches: UNLIMITED (background)")
+    print_info(f"Anti-Fatigue Break: Every {FATIGUE_MATCH_THRESHOLD} matches ({FATIGUE_REST_MIN}s - {FATIGUE_REST_MAX}s)")
     print_info(f"Cache TTL: {TOKEN_CACHE_TTL}s ({TOKEN_CACHE_TTL//60} min)")
     print_info(f"Priority Regions: {PRIORITY_REGIONS}")
     print_info("Device System: 1 ID = 1 Persistent Device ID (devices.json)")
@@ -2267,20 +2315,87 @@ async def main():
     async def on_account_added_handler(data):
         region = str(data.get("region", "BD")).strip().upper()
         if "token" in data and data["token"]:
-            t = str(data["token"]).strip()
-            task = asyncio.create_task(account_loop_token(t, region))
-            bot_state.account_workers[t[:10]] = task
+            t_val = str(data["token"]).strip()
+            if t_val[:10] in bot_state.account_workers:
+                bot_state.account_workers[t_val[:10]].cancel()
+            task = asyncio.create_task(account_loop_token(t_val, region))
+            bot_state.account_workers[t_val[:10]] = task
         elif "uid" in data and "password" in data:
             u = str(data["uid"]).strip()
             p = str(data["password"]).strip()
+            if u in bot_state.account_workers:
+                bot_state.account_workers[u].cancel()
             task = asyncio.create_task(account_loop_guest(u, p, region))
             bot_state.account_workers[u] = task
 
-    async def on_refresh_account_handler(uid):
+    async def on_refresh_account_handler(data):
+        uid = data.get("uid") if isinstance(data, dict) else data
         await refresh_account_profile(uid)
+
+    async def on_account_deleted_handler(data):
+        uid = str(data.get("uid", "")).strip() if isinstance(data, dict) else str(data).strip()
+        if uid in bot_state.account_workers:
+            bot_state.account_workers[uid].cancel()
+            del bot_state.account_workers[uid]
+            print_warning(f"Account {uid} deleted via Web. Worker stopped.")
+
+    async def on_account_toggled_handler(data):
+        if not isinstance(data, dict): return
+        uid = str(data.get("uid", "")).strip()
+        action = data.get("action")
+        if uid and action:
+            if action == "pause":
+                if uid in bot_state.account_workers:
+                    bot_state.account_workers[uid].cancel()
+                    del bot_state.account_workers[uid]
+                    try: bot_state.update_status(uid, "PAUSED")
+                    except: pass
+                    print_warning(f"Account {uid} paused via Web.")
+            elif action == "resume":
+                if uid not in bot_state.account_workers:
+                    acc_data = bot_state.account_credentials.get(uid)
+                    if acc_data:
+                        reg = acc_data.get('region', 'BD')
+                        if acc_data.get('auth_type') == 'token':
+                            t = asyncio.create_task(account_loop_token(acc_data['auth_token'], reg))
+                            bot_state.account_workers[uid] = t
+                        else:
+                            t = asyncio.create_task(account_loop_guest(acc_data['auth_uid'], acc_data['auth_password'], reg))
+                            bot_state.account_workers[uid] = t
+                        print_success(f"Account {uid} resumed via Web.")
+                        try: bot_state.update_status(uid, "CONNECTING")
+                        except: pass
+
+    async def on_toggle_all_handler(data):
+        action = data.get("action") if isinstance(data, dict) else "pause"
+        if action == "pause":
+            for uid, task in list(bot_state.account_workers.items()):
+                task.cancel()
+                try: bot_state.update_status(uid, "PAUSED")
+                except: pass
+            bot_state.account_workers.clear()
+            print_warning("All accounts paused via Web.")
+        elif action == "resume":
+            for acc_id in bot_state.accounts.keys():
+                if acc_id not in bot_state.account_workers:
+                    acc_data = bot_state.account_credentials.get(acc_id)
+                    if acc_data:
+                        reg = acc_data.get('region', 'BD')
+                        if acc_data.get('auth_type') == 'token':
+                            t = asyncio.create_task(account_loop_token(acc_data['auth_token'], reg))
+                            bot_state.account_workers[acc_id] = t
+                        else:
+                            t = asyncio.create_task(account_loop_guest(acc_data['auth_uid'], acc_data['auth_password'], reg))
+                            bot_state.account_workers[acc_id] = t
+                        try: bot_state.update_status(acc_id, "CONNECTING")
+                        except: pass
+            print_success("All accounts resumed via Web.")
 
     bot_state.refresh_callbacks["on_account_added"] = on_account_added_handler
     bot_state.refresh_callbacks["on_refresh_account"] = on_refresh_account_handler
+    bot_state.refresh_callbacks["on_account_deleted"] = on_account_deleted_handler
+    bot_state.refresh_callbacks["on_account_toggled"] = on_account_toggled_handler
+    bot_state.refresh_callbacks["on_toggle_all"] = on_toggle_all_handler
 
     accounts = load_accounts()
 
@@ -2289,7 +2404,6 @@ async def main():
         print_warning(f"Open: http://localhost:{WEB_PORT}")
 
     for acc in accounts:
-        # Defaults to BD if region isn't available in JSON
         region = str(acc.get("region", "BD")).strip().upper()
         if "token" in acc and acc["token"]:
             t = asyncio.create_task(account_loop_token(acc["token"], region))
