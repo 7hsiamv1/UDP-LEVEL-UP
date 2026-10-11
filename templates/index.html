@@ -62,6 +62,8 @@
             backdrop-filter: blur(16px);
             box-shadow: var(--glass-glow);
             margin-bottom: 24px;
+            flex-wrap: wrap;
+            gap: 16px;
         }
 
         .brand {
@@ -139,6 +141,7 @@
             display: flex;
             align-items: center;
             gap: 12px;
+            flex-wrap: wrap;
         }
 
         .btn {
@@ -359,6 +362,12 @@
             color: var(--accent-cyan);
             border: 1px solid rgba(0, 242, 254, 0.4);
             animation: pulse-border 1.5s infinite alternate;
+        }
+        
+        .status-paused {
+            background: rgba(255, 170, 0, 0.12);
+            color: var(--accent-amber);
+            border: 1px solid rgba(255, 170, 0, 0.25);
         }
 
         @keyframes pulse-border {
@@ -599,6 +608,32 @@
             margin-bottom: 12px;
             color: rgba(255, 255, 255, 0.1);
         }
+        
+        /* Responsive Fix for mobile */
+        @media (max-width: 768px) {
+            header {
+                flex-direction: column;
+                align-items: flex-start;
+                padding: 16px;
+                gap: 16px;
+            }
+            .brand {
+                width: 100%;
+            }
+            .header-actions {
+                width: 100%;
+                display: flex;
+                flex-wrap: wrap;
+                gap: 8px;
+            }
+            .header-actions .btn {
+                flex: 1;
+                justify-content: center;
+                padding: 10px 5px;
+                font-size: 13px;
+                white-space: nowrap;
+            }
+        }
     </style>
 </head>
 <body>
@@ -618,6 +653,7 @@
                 </div>
             </div>
             <div class="header-actions">
+                <button class="btn btn-secondary" onclick="toggleAllAccounts()"><i class="fa-solid fa-power-off"></i> Toggle All</button>
                 <button class="btn btn-secondary" onclick="fetchStats()"><i class="fa-solid fa-rotate"></i> Refresh</button>
                 <button class="btn btn-primary" onclick="openAddModal()"><i class="fa-solid fa-plus"></i> Add Account</button>
             </div>
@@ -728,9 +764,50 @@
         </div>
     </div>
 
-    <script>
-        let startTime = Date.now();
+    <!-- Custom Confirm Delete Modal -->
+    <div class="modal-overlay" id="confirm-modal">
+        <div class="modal-card" style="max-width: 400px; text-align: center; padding: 32px 24px;">
+            <i class="fa-solid fa-triangle-exclamation" style="font-size: 48px; color: var(--accent-red); margin-bottom: 20px;"></i>
+            <h3 style="margin-bottom: 12px; font-size: 20px;">Are you sure?</h3>
+            <p style="color: var(--text-muted); margin-bottom: 24px;" id="confirm-msg">Do you want to remove this account?</p>
+            <div style="display: flex; justify-content: center; gap: 12px;">
+                <button class="btn btn-secondary" onclick="closeConfirmModal()">Cancel</button>
+                <button class="btn btn-primary" style="background: linear-gradient(135deg, #ff3366, #ff0044); box-shadow: 0 4px 16px rgba(255, 51, 102, 0.25);" id="confirm-btn">Yes, Delete</button>
+            </div>
+        </div>
+    </div>
 
+    <script>
+        // Custom Delete Confirmation Logic
+        let accountToDelete = null;
+
+        function confirmDelete(uid) {
+            accountToDelete = uid;
+            document.getElementById('confirm-msg').innerText = `Are you sure you want to remove account ${uid}?`;
+            document.getElementById('confirm-modal').classList.add('active');
+        }
+
+        function closeConfirmModal() {
+            accountToDelete = null;
+            document.getElementById('confirm-modal').classList.remove('active');
+        }
+
+        document.getElementById('confirm-btn').addEventListener('click', async () => {
+            if (!accountToDelete) return;
+            try {
+                await fetch('/api/account/delete', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ uid: accountToDelete })
+                });
+                closeConfirmModal();
+                fetchStats();
+            } catch (err) {
+                console.error(err);
+            }
+        });
+
+        // Add Modal Logic
         function openAddModal() {
             document.getElementById('add-modal').classList.add('active');
         }
@@ -779,13 +856,32 @@
             }
         }
 
-        async function deleteAccount(uid) {
-            if (!confirm('Are you sure you want to remove account ' + uid + '?')) return;
+        // Account ON/OFF Control Logic
+        async function toggleAccount(uid, currentStatus) {
+            const action = currentStatus === 'PAUSED' ? 'resume' : 'pause';
             try {
-                const res = await fetch('/api/account/delete', {
+                await fetch('/api/account/toggle', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ uid })
+                    body: JSON.stringify({ uid: uid, action: action })
+                });
+                fetchStats();
+            } catch (err) {
+                console.error(err);
+            }
+        }
+
+        async function toggleAllAccounts() {
+            const accounts = window.currentAccounts || [];
+            if (accounts.length === 0) return;
+            const runningCount = accounts.filter(a => a.status !== 'PAUSED').length;
+            const action = runningCount > 0 ? 'pause' : 'resume';
+            
+            try {
+                await fetch('/api/account/toggle_all', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ action: action })
                 });
                 fetchStats();
             } catch (err) {
@@ -810,6 +906,7 @@
             try {
                 const res = await fetch('/api/stats');
                 const data = await res.json();
+                window.currentAccounts = data.accounts;
 
                 document.getElementById('stat-total-accounts').innerText = data.total_accounts;
                 document.getElementById('stat-total-exp').innerText = '+' + data.total_gained_exp.toLocaleString() + ' EXP';
@@ -827,8 +924,18 @@
                 } else {
                     container.innerHTML = data.accounts.map(acc => {
                         const gainedExp = acc.gained_exp || 0;
-                        const statusClass = acc.status === 'IN_MATCH' ? 'status-match' : 'status-online';
-                        const statusText = acc.status === 'IN_MATCH' ? `In Match (${acc.active_matches} active)` : acc.status;
+                        let statusClass = 'status-online';
+                        let statusText = acc.status;
+                        let iconHtml = '<span class="pulse-dot"></span>';
+                        
+                        if (acc.status === 'IN_MATCH') {
+                            statusClass = 'status-match';
+                            statusText = `In Match (${acc.active_matches} active)`;
+                        } else if (acc.status === 'PAUSED') {
+                            statusClass = 'status-paused';
+                            statusText = 'Paused';
+                            iconHtml = '<i class="fa-solid fa-pause" style="font-size:10px;"></i>';
+                        }
                         
                         return `
                             <div class="account-card">
@@ -841,7 +948,7 @@
                                         </div>
                                     </div>
                                     <div class="acc-status ${statusClass}">
-                                        <span class="pulse-dot"></span>
+                                        ${iconHtml}
                                         <span>${statusText}</span>
                                     </div>
                                 </div>
@@ -876,8 +983,11 @@
                                 <div class="acc-actions">
                                     <span>Last match: ${acc.last_match_time || 'Running...'}</span>
                                     <div class="action-btns">
+                                        <button class="icon-btn ${acc.status === 'PAUSED' ? 'green' : 'danger'}" title="Toggle ON/OFF" onclick="toggleAccount('${acc.uid}', '${acc.status}')">
+                                            <i class="fa-solid ${acc.status === 'PAUSED' ? 'fa-play' : 'fa-pause'}"></i>
+                                        </button>
                                         <button class="icon-btn" title="Refresh Profile/EXP" onclick="refreshAccountInfo('${acc.uid}')"><i class="fa-solid fa-rotate"></i></button>
-                                        <button class="icon-btn danger" title="Delete Account" onclick="deleteAccount('${acc.uid}')"><i class="fa-solid fa-trash"></i></button>
+                                        <button class="icon-btn danger" title="Delete Account" onclick="confirmDelete('${acc.uid}')"><i class="fa-solid fa-trash"></i></button>
                                     </div>
                                 </div>
                             </div>
@@ -902,7 +1012,15 @@
             return String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
         }
 
-        // Uptime counter
+        // Persistent Uptime Counter Fix
+        let startTime = localStorage.getItem('botStartTime');
+        if (!startTime) {
+            startTime = Date.now();
+            localStorage.setItem('botStartTime', startTime);
+        } else {
+            startTime = parseInt(startTime, 10);
+        }
+
         setInterval(() => {
             const sec = Math.floor((Date.now() - startTime) / 1000);
             const h = String(Math.floor(sec / 3600)).padStart(2, '0');
