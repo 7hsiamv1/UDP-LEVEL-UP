@@ -1,9 +1,9 @@
-# -*- coding: utf-8 -*-
+# dashboard_server.py
 """
-FreeFire Level Up Bot - Professional Web Dashboard & Real-Time EXP Tracker
-Embedded Async Web Server (aiohttp)
+Per-user isolated dashboard.
+Railway pulls active users & their bots from the PHP Web Hosting API.
+Each bot worker is tagged with (user_id, bot_id) so logs/stats go to right owner.
 """
-
 import asyncio
 import json
 import os
@@ -11,216 +11,201 @@ import time
 from typing import Dict, List, Any, Optional
 from aiohttp import web
 
-# Global bot state shared between Main.py and Web Dashboard
+import web_api
+
+
 class BotState:
     def __init__(self):
+        # accounts keyed by "u{user_id}_b{bot_id}"
         self.accounts: Dict[str, Dict[str, Any]] = {}
-        self.logs: List[Dict[str, Any]] = []
+        # logs keyed by the same composite key
+        self.logs: Dict[str, List[Dict[str, Any]]] = {}
         self.max_logs = 200
-        self.total_matches = 0
-        self.total_gained_exp = 0
         self.start_time = time.time()
         self.account_workers: Dict[str, asyncio.Task] = {}
-        self.refresh_callbacks: Dict[str, Any] = {}
-        self.account_credentials: Dict[str, Dict[str, Any]] = {}
+        self.account_meta: Dict[str, Dict[str, Any]] = {}  # key → {user_id, bot_id, username}
 
-    def log(self, message: str, level: str = "info", uid: Optional[str] = None):
-        entry = {
-            "time": time.strftime("%H:%M:%S"),
-            "level": level,
-            "message": message,
-            "uid": uid
-        }
-        self.logs.append(entry)
-        if len(self.logs) > self.max_logs:
-            self.logs.pop(0)
+    def _key(self, user_id: int, bot_id: int) -> str:
+        return f"u{user_id}_b{bot_id}"
 
-    def register_account(self, uid: str, nickname: str, region: str, level: int, exp: int, likes: int = 0):
-        uid_str = str(uid)
-        if uid_str not in self.accounts:
-            self.accounts[uid_str] = {
-                "uid": uid_str,
-                "nickname": nickname or f"Player_{uid_str[:6]}",
-                "region": region or "BD",
-                "level": level or 1,
-                "initial_exp": exp,
-                "current_exp": exp,
-                "gained_exp": 0,
-                "likes": likes or 0,
-                "status": "ONLINE",
-                "matches_played": 0,
-                "active_matches": 0,
+    def log(self, message: str, level: str = "info",
+            user_id: Optional[int] = None, bot_id: Optional[int] = None,
+            uid: Optional[str] = None):
+        entry = {"time": time.strftime("%H:%M:%S"), "level": level,
+                 "message": message, "uid": uid}
+        if user_id and bot_id:
+            k = self._key(user_id, bot_id)
+            self.logs.setdefault(k, []).append(entry)
+            if len(self.logs[k]) > self.max_logs:
+                self.logs[k].pop(0)
+            # Push to web hosting (fire & forget)
+            asyncio.create_task(web_api.report_log(user_id, bot_id, level, message))
+        else:
+            # system-level log — keep in global buffer
+            self.logs.setdefault("_system", []).append(entry)
+            if len(self.logs["_system"]) > self.max_logs:
+                self.logs["_system"].pop(0)
+        # also echo to stdout
+        try:
+            print(f"[{level.upper()}] {message}")
+        except Exception:
+            pass
+
+    def register_account(self, user_id: int, bot_id: int, uid: str, nickname: str,
+                         region: str, level: int, exp: int, likes: int = 0):
+        k = self._key(user_id, bot_id)
+        self.account_meta[k] = {"user_id": user_id, "bot_id": bot_id}
+        if k not in self.accounts:
+            self.accounts[k] = {
+                "user_id": user_id, "bot_id": bot_id,
+                "uid": uid, "nickname": nickname or f"Player_{uid[:6]}",
+                "region": region or "BD", "level": level or 1,
+                "initial_exp": exp, "current_exp": exp, "gained_exp": 0,
+                "likes": likes or 0, "status": "ONLINE",
+                "matches_played": 0, "active_matches": 0,
                 "last_match_time": None,
-                "last_updated": time.strftime("%H:%M:%S")
+                "last_updated": time.strftime("%H:%M:%S"),
             }
         else:
-            acc = self.accounts[uid_str]
-            if nickname:
-                acc["nickname"] = nickname
-            if region:
-                acc["region"] = region
-            if level:
-                acc["level"] = level
-            acc["current_exp"] = exp
-            acc["gained_exp"] = max(0, exp - acc["initial_exp"])
-            acc["likes"] = likes
-            acc["status"] = "ONLINE"
-            acc["last_updated"] = time.strftime("%H:%M:%S")
-        self.recalc_totals()
+            a = self.accounts[k]
+            if nickname: a["nickname"] = nickname
+            if region: a["region"] = region
+            if level: a["level"] = level
+            a["current_exp"] = exp
+            a["gained_exp"] = max(0, exp - a["initial_exp"])
+            a["likes"] = likes
+            a["status"] = "ONLINE"
+            a["last_updated"] = time.strftime("%H:%M:%S")
 
-    def update_exp(self, uid: str, current_exp: int, level: Optional[int] = None):
-        uid_str = str(uid)
-        if uid_str in self.accounts:
-            acc = self.accounts[uid_str]
-            old_exp = acc["current_exp"]
-            acc["current_exp"] = current_exp
-            if level is not None and level > 0:
-                acc["level"] = level
-            acc["gained_exp"] = max(0, current_exp - acc["initial_exp"])
-            acc["last_updated"] = time.strftime("%H:%M:%S")
-            diff = current_exp - old_exp
-            if diff > 0:
-                self.log(f"Account {acc['nickname']} ({uid_str}) gained +{diff} EXP! Total Gained: +{acc['gained_exp']}", "success", uid_str)
-            self.recalc_totals()
+    def update_exp(self, user_id: int, bot_id: int, current_exp: int, level: Optional[int] = None):
+        k = self._key(user_id, bot_id)
+        if k not in self.accounts: return
+        a = self.accounts[k]
+        a["current_exp"] = current_exp
+        if level and level > 0: a["level"] = level
+        a["gained_exp"] = max(0, current_exp - a["initial_exp"])
+        a["last_updated"] = time.strftime("%H:%M:%S")
 
-    def update_status(self, uid: str, status: str, active_matches: Optional[int] = None):
-        uid_str = str(uid)
-        if uid_str in self.accounts:
-            self.accounts[uid_str]["status"] = status
-            if active_matches is not None:
-                self.accounts[uid_str]["active_matches"] = active_matches
-            self.accounts[uid_str]["last_updated"] = time.strftime("%H:%M:%S")
+    def update_status(self, user_id: int, bot_id: int, status: str, active_matches: Optional[int] = None):
+        k = self._key(user_id, bot_id)
+        if k not in self.accounts: return
+        a = self.accounts[k]
+        a["status"] = status
+        if active_matches is not None: a["active_matches"] = active_matches
+        a["last_updated"] = time.strftime("%H:%M:%S")
 
-    def increment_match(self, uid: str):
-        uid_str = str(uid)
-        self.total_matches += 1
-        if uid_str in self.accounts:
-            self.accounts[uid_str]["matches_played"] += 1
-            self.accounts[uid_str]["last_match_time"] = time.strftime("%H:%M:%S")
-            self.accounts[uid_str]["last_updated"] = time.strftime("%H:%M:%S")
-            self.log(f"Account {self.accounts[uid_str]['nickname']} finished Match #{self.accounts[uid_str]['matches_played']}", "info", uid_str)
+    def increment_match(self, user_id: int, bot_id: int):
+        k = self._key(user_id, bot_id)
+        if k not in self.accounts: return
+        a = self.accounts[k]
+        a["matches_played"] += 1
+        a["last_match_time"] = time.strftime("%H:%M:%S")
+        a["last_updated"] = time.strftime("%H:%M:%S")
 
-    def recalc_totals(self):
-        self.total_gained_exp = sum(acc.get("gained_exp", 0) for acc in self.accounts.values())
+    async def push_stats(self, user_id: int, bot_id: int):
+        k = self._key(user_id, bot_id)
+        a = self.accounts.get(k)
+        if not a: return
+        await web_api.report_stats(bot_id, {
+            "nickname": a["nickname"], "level": a["level"],
+            "initial_exp": a["initial_exp"], "current_exp": a["current_exp"],
+            "gained_exp": a["gained_exp"], "likes": a["likes"],
+            "status": a["status"], "matches_played": a["matches_played"],
+            "active_matches": a["active_matches"],
+            "last_match_time": a["last_match_time"],
+        })
 
 
 bot_state = BotState()
 
 
-# ==================== HTTP HANDLERS ====================
+# ============== PERIODIC SYNC WITH WEB HOSTING ==============
 
-TEMPLATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates", "index.html")
-
-async def handle_index(request: web.Request) -> web.Response:
-    if os.path.exists(TEMPLATE_PATH):
-        with open(TEMPLATE_PATH, "r", encoding="utf-8") as f:
-            content = f.read()
-    else:
-        content = "<h1>templates/index.html not found!</h1>"
-    return web.Response(text=content, content_type="text/html", charset="utf-8")
+_sync_lock = asyncio.Lock()
 
 
-async def handle_get_stats(request: web.Request) -> web.Response:
-    accounts_data = list(bot_state.accounts.values())
-    accounts_data.sort(key=lambda x: x.get("gained_exp", 0), reverse=True)
+async def _sync_loop():
+    """Every 20s: pull users from web API, add workers for new bots, stop workers for deleted ones."""
+    from Main import account_loop_guest, account_loop_token  # lazy import to avoid circular
+
+    while True:
+        try:
+            async with _sync_lock:
+                users = await web_api.pull_users()
+                active_keys = set()
+                for u in users:
+                    user_id = u["user_id"]
+                    username = u.get("username", f"user{user_id}")
+                    for b in u["bots"]:
+                        bot_id = b["id"]
+                        k = bot_state._key(user_id, bot_id)
+                        active_keys.add(k)
+
+                        if k in bot_state.account_workers and not bot_state.account_workers[k].done():
+                            continue
+
+                        # start new worker
+                        bot_state.account_meta[k] = {"user_id": user_id, "bot_id": bot_id,
+                                                      "username": username}
+                        if b.get("access_token"):
+                            task = asyncio.create_task(
+                                account_loop_token(b["access_token"], user_id, bot_id,
+                                                   region=b.get("region", "BD"))
+                            )
+                        elif b.get("uid") and b.get("password"):
+                            task = asyncio.create_task(
+                                account_loop_guest(b["uid"], b["password"], user_id, bot_id,
+                                                   region=b.get("region", "BD"))
+                            )
+                        else:
+                            continue
+                        bot_state.account_workers[k] = task
+                        bot_state.log(f"🚀 Worker started for {username} bot #{bot_id}",
+                                      "success", user_id=user_id, bot_id=bot_id)
+
+                # stop deleted/paused bots
+                for k in list(bot_state.account_workers.keys()):
+                    if k not in active_keys:
+                        task = bot_state.account_workers[k]
+                        if not task.done(): task.cancel()
+                        del bot_state.account_workers[k]
+                        if k in bot_state.accounts:
+                            del bot_state.accounts[k]
+                        bot_state.log(f"🛑 Worker stopped (removed/paused).", "warning",
+                                      user_id=bot_state.account_meta.get(k, {}).get("user_id"),
+                                      bot_id=bot_state.account_meta.get(k, {}).get("bot_id"))
+                        bot_state.account_meta.pop(k, None)
+
+                # push stats to web hosting every cycle
+                for k, a in list(bot_state.accounts.items()):
+                    await bot_state.push_stats(a["user_id"], a["bot_id"])
+
+        except Exception as e:
+            print(f"[SYNC] error: {e}")
+        await asyncio.sleep(20)
+
+
+# ============== OPTIONAL: local mini web UI (for debugging) ==============
+
+async def handle_stats(request: web.Request) -> web.Response:
+    """Public JSON snapshot (nobody should rely on this; main dashboard is on PHP)."""
     return web.json_response({
-        "total_accounts": len(bot_state.accounts),
-        "total_matches": bot_state.total_matches,
-        "total_gained_exp": bot_state.total_gained_exp,
-        "accounts": accounts_data,
-        "logs": bot_state.logs[-60:],
-        "uptime": int(time.time() - bot_state.start_time)
+        "total_workers": len(bot_state.account_workers),
+        "accounts": list(bot_state.accounts.values()),
+        "uptime": int(time.time() - bot_state.start_time),
     })
-
-
-async def handle_add_account(request: web.Request) -> web.Response:
-    try:
-        data = await request.json()
-        accounts_file = "accounts.json"
-        existing = []
-        if os.path.exists(accounts_file):
-            try:
-                with open(accounts_file, "r", encoding="utf-8") as f:
-                    existing = json.load(f)
-            except Exception:
-                existing = []
-
-        if "uid" in data and "password" in data:
-            uid = str(data["uid"]).strip()
-            pwd = str(data["password"]).strip()
-            if not uid or not pwd:
-                return web.json_response({"status": "error", "error": "UID and Password are required"})
-            existing = [acc for acc in existing if str(acc.get("uid")) != uid]
-            existing.append({"uid": uid, "password": pwd})
-        elif "token" in data:
-            token = str(data["token"]).strip()
-            if not token:
-                return web.json_response({"status": "error", "error": "Token is required"})
-            existing = [acc for acc in existing if acc.get("token") != token]
-            existing.append({"token": token})
-        else:
-            return web.json_response({"status": "error", "error": "Invalid payload"})
-
-        with open(accounts_file, "w", encoding="utf-8") as f:
-            json.dump(existing, f, indent=2)
-
-        bot_state.log(f"New account added: {data.get('uid') or 'Token'}", "success")
-        
-        # Trigger dynamic worker launch
-        if "on_account_added" in bot_state.refresh_callbacks:
-            asyncio.create_task(bot_state.refresh_callbacks["on_account_added"](data))
-
-        return web.json_response({"status": "ok"})
-    except Exception as e:
-        return web.json_response({"status": "error", "error": str(e)})
-
-
-async def handle_delete_account(request: web.Request) -> web.Response:
-    try:
-        data = await request.json()
-        uid = str(data.get("uid")).strip()
-        accounts_file = "accounts.json"
-        if os.path.exists(accounts_file):
-            with open(accounts_file, "r", encoding="utf-8") as f:
-                existing = json.load(f)
-            existing = [acc for acc in existing if str(acc.get("uid")) != uid]
-            with open(accounts_file, "w", encoding="utf-8") as f:
-                json.dump(existing, f, indent=2)
-
-        if uid in bot_state.accounts:
-            del bot_state.accounts[uid]
-
-        if uid in bot_state.account_workers:
-            bot_state.account_workers[uid].cancel()
-            del bot_state.account_workers[uid]
-
-        bot_state.log(f"Account {uid} removed from rotation.", "warning", uid)
-        return web.json_response({"status": "ok"})
-    except Exception as e:
-        return web.json_response({"status": "error", "error": str(e)})
-
-
-async def handle_refresh_account(request: web.Request) -> web.Response:
-    try:
-        data = await request.json()
-        uid = str(data.get("uid")).strip()
-        if "on_refresh_account" in bot_state.refresh_callbacks:
-            asyncio.create_task(bot_state.refresh_callbacks["on_refresh_account"](uid))
-        return web.json_response({"status": "ok"})
-    except Exception as e:
-        return web.json_response({"status": "error", "error": str(e)})
 
 
 async def start_web_dashboard(host: str = "0.0.0.0", port: int = 5000):
     app = web.Application()
-    app.router.add_get("/", handle_index)
-    app.router.add_get("/api/stats", handle_get_stats)
-    app.router.add_post("/api/account/add", handle_add_account)
-    app.router.add_post("/api/account/delete", handle_delete_account)
-    app.router.add_post("/api/account/refresh", handle_refresh_account)
+    app.router.add_get("/api/stats", handle_stats)
+    app.router.add_get("/health", lambda r: web.Response(text="OK"))
 
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, host, port)
     await site.start()
-    print(f"\033[92m[+] Web Dashboard running on http://localhost:{port}\033[0m")
+    print(f"\033[92m[+] Debug endpoint http://localhost:{port}/api/stats\033[0m")
+
+    # Kick off sync loop
+    asyncio.create_task(_sync_loop())
