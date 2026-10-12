@@ -49,14 +49,6 @@ MODE_ID = 1
 MAP_ID = 1
 PRIORITY_REGIONS = ["BD", "IND", "SG", "TH", "PH", "VN", "MY", "ID", "HK", "TW"]
 
-# 🔥 lvl.py এর সাথে মিলিয়ে ফাস্ট anti-fatigue
-FATIGUE_MATCH_THRESHOLD = 20
-FATIGUE_REST_MIN = 90.0
-FATIGUE_REST_MAX = 150.0
-
-# 🔥 lvl.py তে এই rate-limit গুলো নেই — তাই effectively disabled
-HOURLY_MATCH_LIMIT = 999999
-GLOBAL_HOURLY_MATCH_LIMIT = 999999
 _min_delay_between_matches = (3.0, 3.0)
 
 MAX_CONSECUTIVE_PARSE_FAILURES = 5.0
@@ -64,10 +56,6 @@ NON_MATCH_RECONNECT_DELAY = 0.5
 
 FALLBACK_UID = ""
 FALLBACK_PASSWORD = ""
-
-_hourly_matches: Dict[str, Dict[str, int]] = {}
-_global_hourly: Dict[str, int] = {}
-_rate_lock = asyncio.Lock()
 
 
 # ==================== PROTOBUF HELPERS ====================
@@ -396,35 +384,7 @@ async def _get_total_match_count() -> int:
         return sum(_match_counters.values())
 
 
-# ==================== RATE LIMIT + TARGET-LEVEL ====================
-async def _check_hourly_limit(uid: str) -> Tuple[bool, float]:
-    now = time.time()
-    hkey = str(int(now // 3600))
-    async with _rate_lock:
-        for k in list(_global_hourly.keys()):
-            if k != hkey:
-                _global_hourly.pop(k, None)
-        for u in list(_hourly_matches.keys()):
-            _hourly_matches[u] = {k: v for k, v in _hourly_matches[u].items() if k == hkey}
-
-        u_counts = _hourly_matches.setdefault(uid, {})
-        user_count = u_counts.get(hkey, 0)
-        global_count = _global_hourly.get(hkey, 0)
-
-        if user_count >= HOURLY_MATCH_LIMIT or global_count >= GLOBAL_HOURLY_MATCH_LIMIT:
-            wait = ((int(now // 3600) + 1) * 3600) - now
-            return False, max(30.0, wait)
-        return True, 0.0
-
-
-async def _bump_hourly(uid: str):
-    now = time.time()
-    hkey = str(int(now // 3600))
-    async with _rate_lock:
-        _hourly_matches.setdefault(uid, {})[hkey] = _hourly_matches[uid].get(hkey, 0) + 1
-        _global_hourly[hkey] = _global_hourly.get(hkey, 0) + 1
-
-
+# ==================== TARGET-LEVEL ====================
 def _target_reached(uid_str: str, target_level: int) -> bool:
     if not target_level or target_level <= 0:
         return False
@@ -1556,7 +1516,7 @@ async def play_game(server_ip_port, thunder, sharma, udp_key, match_code,
 
 
 # ============================================================
-# functional_br
+# functional_br — lvl.py style (No Resting, No Hourly Limit)
 # ============================================================
 async def functional_br(addrs, starter_packet, account_region, client_version,
                         key, iv, account_id="", account_data=None,
@@ -1568,7 +1528,6 @@ async def functional_br(addrs, starter_packet, account_region, client_version,
     search_attempts = 0
     last_start_time = 0.0
     uid_str = str(account_id)
-    matches_queued_in_session = 0
 
     consecutive_parse_failures = 0
 
@@ -1685,23 +1644,6 @@ async def functional_br(addrs, starter_packet, account_region, client_version,
                         pass
                     return
 
-                allowed, wait_s = await _check_hourly_limit(uid_str)
-                if not allowed:
-                    print_warning(f"[RATE] UID {uid_str} hourly limit reached. Pausing {wait_s:.0f}s")
-                    try:
-                        bot_state.update_status(uid_str, "RESTING", len(play_matches))
-                    except Exception:
-                        pass
-                    if gw_ping_task:
-                        gw_ping_task.cancel()
-                    try:
-                        writer.close()
-                        await writer.wait_closed()
-                    except Exception:
-                        pass
-                    await asyncio.sleep(wait_s)
-                    continue
-
                 await send_start_match()
 
                 while True:
@@ -1805,7 +1747,6 @@ async def functional_br(addrs, starter_packet, account_region, client_version,
 
                                 match_index = await _inc_match(uid_str)
                                 total = await _get_total_match_count()
-                                await _bump_hourly(uid_str)
                                 print_colored(
                                     f"🚀 [MATCH #{match_index}] UDP starting → {server_ip_port} (background)",
                                     Colors.CYAN
@@ -1833,7 +1774,6 @@ async def functional_br(addrs, starter_packet, account_region, client_version,
                                 play_matches.append(new_match)
 
                                 consecutive_parse_failures = 0
-                                matches_queued_in_session += 1
 
                                 if gw_ping_task:
                                     gw_ping_task.cancel()
@@ -1843,22 +1783,10 @@ async def functional_br(addrs, starter_packet, account_region, client_version,
                                 except Exception:
                                     pass
 
-                                if matches_queued_in_session >= FATIGUE_MATCH_THRESHOLD:
-                                    rest_time = random.uniform(FATIGUE_REST_MIN, FATIGUE_REST_MAX)
-                                    print_colored(
-                                        f"☕ [REST] {matches_queued_in_session}টি ম্যাচ শেষ। Anti-ban বিরতি {rest_time:.1f}s...",
-                                        Colors.WARNING
-                                    )
-                                    try:
-                                        bot_state.update_status(uid_str, "RESTING", len(play_matches))
-                                    except Exception:
-                                        pass
-                                    await asyncio.sleep(rest_time)
-                                    matches_queued_in_session = 0
-                                else:
-                                    rand_delay = random.uniform(*_min_delay_between_matches)
-                                    print_info(f"[OFFLINE] {rand_delay:.1f}s offline → new StartMatch")
-                                    await asyncio.sleep(rand_delay)
+                                # lvl.py style: শুধু ছোট offline delay — কোনো rest/hourly limit নেই
+                                rand_delay = random.uniform(*_min_delay_between_matches)
+                                print_info(f"[OFFLINE] {rand_delay:.1f}s offline → new StartMatch")
+                                await asyncio.sleep(rand_delay)
 
                                 reconnects = 0
                                 break
@@ -2517,9 +2445,6 @@ async def main():
     print_info(f"Non-match Reconnect: {NON_MATCH_RECONNECT_DELAY}s")
     print_info(f"Cache Invalidation Threshold: {MAX_CONSECUTIVE_PARSE_FAILURES}x")
     print_info("Parallel Matches: UNLIMITED (background)")
-    print_info(f"Anti-Fatigue Break: Every {FATIGUE_MATCH_THRESHOLD} matches ({FATIGUE_REST_MIN}s - {FATIGUE_REST_MAX}s)")
-    print_info(f"Hourly Match Limit (per account): {HOURLY_MATCH_LIMIT}")
-    print_info(f"Hourly Match Limit (global): {GLOBAL_HOURLY_MATCH_LIMIT}")
     print_info(f"Random Match Delay: {_min_delay_between_matches[0]:.1f}s - {_min_delay_between_matches[1]:.1f}s")
     print_info(f"Cache TTL: {TOKEN_CACHE_TTL}s ({TOKEN_CACHE_TTL//60} min)")
     print_info(f"Priority Regions: {PRIORITY_REGIONS}")
@@ -2532,18 +2457,15 @@ async def main():
     except Exception as e:
         print_error(f"Could not start web dashboard: {e}")
 
-    # 🔥 Helper: robust worker cancellation (handles key mismatches between dashboard
-    #    and internal worker dict — fixes "delete but worker keeps running" bug).
+    # 🔥 Helper: robust worker cancellation
     def _find_and_cancel_worker(uid: str) -> bool:
         if not uid:
             return False
 
-        # 1) Direct key match
         if uid in bot_state.account_workers:
             bot_state.account_workers.pop(uid).cancel()
             return True
 
-        # 2) Look up credentials by account_id / auth_uid / tok_ prefix
         matched_cred_keys = []
         for cred_key, creds in list(bot_state.account_credentials.items()):
             if not isinstance(creds, dict):
@@ -2552,7 +2474,6 @@ async def main():
                     or str(creds.get('auth_uid')) == uid):
                 matched_cred_keys.append(cred_key)
 
-        # 3) Try every plausible worker key derived from matched credentials
         for cred_key in matched_cred_keys:
             creds = bot_state.account_credentials.get(cred_key) or {}
             candidate_keys = set()
