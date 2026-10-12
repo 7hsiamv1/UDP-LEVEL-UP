@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Admin Panel | 7H SIAM</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+<style>
+:root{--bg-base:#060913;--bg-card:rgba(13,19,36,0.75);--border-card:rgba(0,242,254,0.12);--accent-cyan:#00f2fe;--accent-blue:#4facfe;--accent-purple:#7f00ff;--accent-green:#00ff88;--accent-red:#ff3366;--accent-amber:#ffaa00;--text-main:#f0f4fc;--text-muted:#8e9bb5}
+*{box-sizing:border-box;margin:0;padding:0;font-family:'Outfit',sans-serif}
+body{background:radial-gradient(circle at 15% 15%,rgba(127,0,255,0.14) 0%,transparent 45%),radial-gradient(circle at 85% 85%,rgba(0,242,254,0.12) 0%,transparent 45%),linear-gradient(180deg,#060913 0%,#0a0e1c 100%);color:var(--text-main);min-height:100vh;padding:24px}
+.container{max-width:1600px;margin:0 auto}
+header{display:flex;align-items:center;justify-content:space-between;padding:20px 28px;background:var(--bg-card);border:1px solid var(--border-card);border-radius:20px;backdrop-filter:blur(16px);margin-bottom:24px;flex-wrap:wrap;gap:16px}
+.brand{display:flex;align-items:center;gap:16px}
+.logo-box{width:48px;height:48px;background:linear-gradient(135deg,#ff3366,#7f00ff);border-radius:14px;display:flex;align-items:center;justify-content:center;font-size:22px;color:#fff;box-shadow:0 0 20px rgba(255,51,102,0.4)}
+.brand-text h1{font-size:22px;font-weight:800;background:linear-gradient(90deg,#fff,#ff3366);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.brand-text p{font-size:13px;color:var(--text-muted)}
+.header-actions{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.btn{display:inline-flex;align-items:center;gap:8px;padding:10px 18px;border-radius:12px;font-size:14px;font-weight:600;cursor:pointer;transition:all 0.25s;border:none;outline:none}
+.btn-primary{background:linear-gradient(135deg,var(--accent-blue),var(--accent-cyan));color:#040914}
+.btn-secondary{background:rgba(255,255,255,0.05);border:1px solid var(--border-card);color:var(--text-main)}
+.btn-danger{background:linear-gradient(135deg,#ff3366,#ff0044);color:#fff}
+.btn:hover{transform:translateY(-2px)}
+.stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:18px;margin-bottom:24px}
+.stat-card{background:var(--bg-card);border:1px solid var(--border-card);border-radius:18px;padding:20px;display:flex;align-items:center;gap:18px}
+.stat-icon{width:52px;height:52px;border-radius:14px;display:flex;align-items:center;justify-content:center;font-size:22px}
+.stat-icon.cyan{background:rgba(0,242,254,0.15);color:var(--accent-cyan)}
+.stat-icon.green{background:rgba(0,255,136,0.15);color:var(--accent-green)}
+.stat-icon.purple{background:rgba(127,0,255,0.15);color:#c084fc}
+.stat-icon.amber{background:rgba(255,170,0,0.15);color:var(--accent-amber)}
+.stat-icon.red{background:rgba(255,51,102,0.15);color:var(--accent-red)}
+.stat-content h3{font-size:26px;font-weight:800;color:#fff}
+.stat-content p{font-size:13px;color:var(--text-muted);font-weight:500}
+.card-box{background:var(--bg-card);border:1px solid var(--border-card);border-radius:20px;padding:24px;margin-bottom:24px}
+.box-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:20px}
+.box-title{font-size:18px;font-weight:700;display:flex;align-items:center;gap:10px}
+.owner-card{background:rgba(10,15,30,0.65);border:1px solid rgba(255,255,255,0.07);border-radius:16px;padding:18px;margin-bottom:14px}
+.owner-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:10px}
+.owner-id{font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--accent-cyan);word-break:break-all}
+.owner-stats{display:flex;gap:16px;font-size:12px;color:var(--text-muted)}
+.owner-stats b{color:#fff;font-weight:700}
+.acc-row{display:grid;grid-template-columns:2fr 1fr 1fr 1fr 1fr;gap:10px;padding:10px 12px;background:rgba(0,0,0,0.25);border-radius:10px;margin-top:8px;font-size:12px;align-items:center}
+.acc-row .uid{font-family:'JetBrains Mono',monospace;color:var(--accent-cyan);font-size:11px}
+.badge{padding:3px 8px;border-radius:6px;font-size:10px;font-weight:700;text-transform:uppercase}
+.badge-online{background:rgba(0,255,136,0.15);color:#00ff88}
+.badge-match{background:rgba(0,242,254,0.15);color:#00f2fe}
+.badge-paused{background:rgba(255,170,0,0.15);color:#ffaa00}
+.badge-resting{background:rgba(127,0,255,0.15);color:#c084fc}
+.badge-target{background:rgba(0,255,136,0.25);color:#00ff88}
+.badge-error{background:rgba(255,51,102,0.15);color:#ff3366}
+.log-stream{background:#03060f;border:1px solid rgba(255,255,255,0.05);border-radius:14px;padding:14px;font-family:'JetBrains Mono',monospace;font-size:12px;max-height:420px;overflow-y:auto;display:flex;flex-direction:column;gap:6px}
+.log-item{line-height:1.4;word-break:break-all}
+.log-time{color:#64748b;margin-right:6px}
+.log-info{color:#38bdf8}
+.log-success{color:#4ade80}
+.log-warning{color:#fbbf24}
+.log-error{color:#f87171}
+#auth-screen{position:fixed;inset:0;background:radial-gradient(circle at 20% 20%,rgba(255,51,102,0.15),transparent 50%),radial-gradient(circle at 80% 80%,rgba(127,0,255,0.15),transparent 50%),#04070f;display:flex;align-items:center;justify-content:center;z-index:9999;padding:16px}
+.auth-card{width:100%;max-width:420px;background:rgba(13,19,36,0.85);border:1px solid rgba(255,51,102,0.2);border-radius:22px;padding:34px;backdrop-filter:blur(20px)}
+.auth-logo{width:64px;height:64px;margin:0 auto 18px;background:linear-gradient(135deg,#ff3366,#7f00ff);border-radius:18px;display:flex;align-items:center;justify-content:center;font-size:28px;color:#fff}
+.auth-title{text-align:center;font-size:24px;font-weight:800;margin-bottom:6px;color:#fff}
+.auth-sub{text-align:center;color:var(--text-muted);font-size:13px;margin-bottom:24px}
+.form-group{margin-bottom:16px}
+.form-group label{display:block;font-size:13px;font-weight:600;color:var(--text-muted);margin-bottom:6px}
+.form-input{width:100%;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);border-radius:10px;padding:10px 14px;color:#fff;font-size:14px;outline:none}
+.form-input:focus{border-color:#ff3366}
+.auth-error{color:#ff3366;font-size:13px;text-align:center;margin-top:12px;min-height:18px}
+.user-chip{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text-muted);padding:8px 12px;background:rgba(255,51,102,0.08);border-radius:10px;border:1px solid rgba(255,51,102,0.2)}
+.user-chip i{color:#ff3366}
+@media (max-width:768px){.acc-row{grid-template-columns:1fr 1fr;font-size:11px}}
+</style>
+</head>
+<body>
+
+<div id="auth-screen">
+  <div class="auth-card">
+    <div class="auth-logo"><i class="fa-solid fa-shield-halved"></i></div>
+    <div class="auth-title">ADMIN ACCESS</div>
+    <div class="auth-sub">7H SIAM • Restricted Area</div>
+    <form onsubmit="adminLogin(event)">
+      <div class="form-group"><label>Admin Email</label><input type="email" class="form-input" id="a-email" required placeholder="admin@example.com"></div>
+      <div class="form-group"><label>Password</label><input type="password" class="form-input" id="a-pass" required placeholder="••••••••"></div>
+      <button type="submit" class="btn btn-danger" style="width:100%;justify-content:center;padding:12px"><i class="fa-solid fa-lock-open"></i> Login as Admin</button>
+      <div class="auth-error" id="a-err"></div>
+    </form>
+  </div>
+</div>
+
+<div class="container" id="admin-app" style="display:none">
+  <header>
+    <div class="brand">
+      <div class="logo-box"><i class="fa-solid fa-crown"></i></div>
+      <div class="brand-text">
+        <h1>ADMIN CONTROL PANEL</h1>
+        <p>All Users • All Bots • All Logs • Real-time</p>
+      </div>
+    </div>
+    <div class="header-actions">
+      <div class="user-chip"><i class="fa-solid fa-user-shield"></i><span id="a-user-email">—</span></div>
+      <button class="btn btn-secondary" onclick="loadOverview()"><i class="fa-solid fa-rotate"></i> Refresh</button>
+      <button class="btn btn-danger" onclick="adminLogout()"><i class="fa-solid fa-right-from-bracket"></i> Logout</button>
+    </div>
+  </header>
+
+  <div class="stats-grid">
+    <div class="stat-card"><div class="stat-icon cyan"><i class="fa-solid fa-users"></i></div><div class="stat-content"><h3 id="a-users">0</h3><p>Total Users</p></div></div>
+    <div class="stat-card"><div class="stat-icon green"><i class="fa-solid fa-robot"></i></div><div class="stat-content"><h3 id="a-accounts">0</h3><p>Total Accounts</p></div></div>
+    <div class="stat-card"><div class="stat-icon purple"><i class="fa-solid fa-gamepad"></i></div><div class="stat-content"><h3 id="a-matches">0</h3><p>Total Matches</p></div></div>
+    <div class="stat-card"><div class="stat-icon amber"><i class="fa-solid fa-angles-up"></i></div><div class="stat-content"><h3 id="a-exp">+0</h3><p>Total EXP</p></div></div>
+    <div class="stat-card"><div class="stat-icon red"><i class="fa-solid fa-fire"></i></div><div class="stat-content"><h3 id="a-workers">0</h3><p>Active Workers</p></div></div>
+  </div>
+
+  <div class="card-box">
+    <div class="box-header"><div class="box-title"><i class="fa-solid fa-sitemap" style="color:var(--accent-cyan)"></i><span>Users & Their Bots</span></div></div>
+    <div id="owners-container"></div>
+  </div>
+
+  <div class="card-box">
+    <div class="box-header"><div class="box-title"><i class="fa-solid fa-terminal" style="color:var(--accent-green)"></i><span>Global Live Log Stream</span></div></div>
+    <div class="log-stream" id="a-logs"></div>
+  </div>
+</div>
+
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-auth-compat.js"></script>
+<script>
+const firebaseConfig = {
+  apiKey: "AIzaSyD3XuX0-zuV0nbiZAjY7mnqNBvyshh-cns",
+  authDomain: "trust--tournament.firebaseapp.com",
+  databaseURL: "https://trust--tournament-default-rtdb.firebaseio.com",
+  projectId: "trust--tournament",
+  storageBucket: "trust--tournament.appspot.com",
+  messagingSenderId: "952470695005",
+  appId: "1:952470695005:web:4e0fe64b9b6afcfb8a71b4",
+  measurementId: "G-WS83KRQQYC"
+};
+firebase.initializeApp(firebaseConfig);
+const auth = firebase.auth();
+let idToken = null;
+
+async function adminLogin(e) {
+  e.preventDefault();
+  const email = document.getElementById("a-email").value.trim();
+  const pass = document.getElementById("a-pass").value;
+  document.getElementById("a-err").innerText = "";
+  try {
+    await auth.signInWithEmailAndPassword(email, pass);
+  } catch (err) {
+    document.getElementById("a-err").innerText = err.message;
+  }
+}
+
+async function adminLogout() { await auth.signOut(); location.reload(); }
+
+auth.onAuthStateChanged(async (user) => {
+  if (user) {
+    idToken = await user.getIdToken(true);
+    document.getElementById("a-user-email").innerText = user.email;
+    try {
+      const r = await fetch("/api/admin/whoami", { headers: { "Authorization": "Bearer " + idToken } });
+      const data = await r.json();
+      if (!data.is_admin) {
+        document.getElementById("a-err").innerText = "You are not an admin.";
+        await auth.signOut();
+        return;
+      }
+      document.getElementById("auth-screen").style.display = "none";
+      document.getElementById("admin-app").style.display = "block";
+      loadOverview();
+      setInterval(loadOverview, 3000);
+    } catch (e) {
+      document.getElementById("a-err").innerText = "Auth error";
+      await auth.signOut();
+    }
+  } else {
+    document.getElementById("auth-screen").style.display = "flex";
+    document.getElementById("admin-app").style.display = "none";
+  }
+});
+
+function badge(status) {
+  const s = (status || "").toUpperCase();
+  if (s === "IN_MATCH") return '<span class="badge badge-match">IN MATCH</span>';
+  if (s === "PAUSED") return '<span class="badge badge-paused">PAUSED</span>';
+  if (s === "RESTING") return '<span class="badge badge-resting">RESTING</span>';
+  if (s === "TARGET_REACHED") return '<span class="badge badge-target">🎯 TARGET</span>';
+  if (s === "ERROR") return '<span class="badge badge-error">ERROR</span>';
+  return '<span class="badge badge-online">' + (s || "ONLINE") + "</span>";
+}
+
+async function loadOverview() {
+  if (!idToken) return;
+  try {
+    const r = await fetch("/api/admin/overview", { headers: { "Authorization": "Bearer " + idToken } });
+    if (r.status === 403) { alert("Not an admin"); return; }
+    const data = await r.json();
+    document.getElementById("a-users").innerText = data.total_users;
+    document.getElementById("a-accounts").innerText = data.total_accounts;
+    document.getElementById("a-matches").innerText = data.total_matches;
+    document.getElementById("a-exp").innerText = "+" + (data.total_gained_exp || 0).toLocaleString();
+    document.getElementById("a-workers").innerText = data.total_active_workers;
+
+    const oc = document.getElementById("owners-container");
+    if (!data.owners || !data.owners.length) {
+      oc.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-muted)">No users yet</div>';
+    } else {
+      oc.innerHTML = data.owners.map(o => `
+        <div class="owner-card">
+          <div class="owner-header">
+            <div>
+              <div style="font-weight:700;margin-bottom:4px"><i class="fa-solid fa-user" style="color:var(--accent-cyan)"></i> User</div>
+              <div class="owner-id">${escapeHtml(o.owner_uid)}</div>
+            </div>
+            <div class="owner-stats">
+              <span>Bots: <b>${o.accounts.length}</b></span>
+              <span>Matches: <b>${o.total_matches}</b></span>
+              <span>EXP: <b>+${o.total_exp.toLocaleString()}</b></span>
+            </div>
+          </div>
+          ${o.accounts.map(a => `
+            <div class="acc-row">
+              <div><b>${escapeHtml(a.nickname)}</b><div class="uid">UID: ${a.uid}</div></div>
+              <div>${badge(a.status)}</div>
+              <div>Lv <b>${a.level}</b>${a.target_level ? ` → ${a.target_level}` : ""}</div>
+              <div>${a.matches_played} matches</div>
+              <div style="color:var(--accent-green)">+${(a.gained_exp||0).toLocaleString()}</div>
+            </div>
+          `).join("")}
+        </div>
+      `).join("");
+    }
+
+    const logs = data.recent_logs || [];
+    const lc = document.getElementById("a-logs");
+    lc.innerHTML = logs.map(l => `<div class="log-item"><span class="log-time">[${l.time}]</span><span class="log-${l.level}">${escapeHtml(l.message)}</span></div>`).join("");
+    lc.scrollTop = lc.scrollHeight;
+  } catch (e) { console.error(e); }
+}
+
+function escapeHtml(text) {
+  if (!text) return "";
+  return String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+</script>
+</body>
+</html>
