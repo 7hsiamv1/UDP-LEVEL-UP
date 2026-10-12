@@ -570,10 +570,8 @@ async def decode_protobuf(data):
     return json.dumps(parsed_results_dict)
 
 
-# ==================== GUEST LOGIN PAYLOAD (login_by=2) ====================
-async def build_majorlogin_payload(open_id, access_token, platform, client_version,
-                                    device_info=None, verr=None, region="BD"):
-    """Guest login payload (login_by=2, platform_sdk_id=1)."""
+# ==================== GUEST LOGIN PAYLOAD (lvl.py হুবহু) ====================
+async def build_majorlogin_payload(open_id, access_token, platform, client_version, device_info=None, verr=None, region="BD"):
     try:
         if verr is None:
             verr = client_version
@@ -584,19 +582,19 @@ async def build_majorlogin_payload(open_id, access_token, platform, client_versi
         proto.client_version = str(verr)
         proto.client_version_code = "2019121229"
 
-        di = device_info or {}
-        proto.system_software = di.get("system_software", "Android OS 15 / API-35 (AP3A.240905.015.A2/185014)")
-        proto.system_hardware = di.get("brand", "Handheld")
-        proto.device_type = di.get("model", "Handheld")
-        proto.screen_width = int(di.get("screen_width", 1600))
-        proto.screen_height = int(di.get("screen_height", 719))
-        proto.screen_dpi = str(di.get("screen_dpi", "234"))
-        proto.processor_details = di.get("processor_details", "ARM64 FP ASIMD AES | 1820 | 8")
-        proto.memory = int(di.get("memory", 2798))
-        proto.gpu_renderer = di.get("gpu_renderer", "Mali-G57")
+        # 🔥 lvl.py এর মতো hardcoded device (server এই signature verify করে)
+        proto.system_software = "Android OS 15 / API-35 (AP3A.240905.015.A2/185014)"
+        proto.system_hardware = "Handheld"
+        proto.device_type = "Handheld"
+        proto.screen_width = 1600
+        proto.screen_height = 719
+        proto.screen_dpi = "234"
+        proto.processor_details = "ARM64 FP ASIMD AES | 1820 | 8"
+        proto.memory = 2798
+        proto.gpu_renderer = "Mali-G57"
         proto.gpu_version = "OpenGL ES 3.2 v1.r49p1-04eac0.2848c17a2fd4e9340e06555168eaa3c9"
-        proto.unique_device_id = di.get("unique_device_id", "Google|f744e396-5694-4e65-995d-97a958f2bd1f")
-        proto.client_ip = di.get("client_ip", "197.0.137.129")
+        proto.unique_device_id = "Google|f744e396-5694-4e65-995d-97a958f2bd1f"
+        proto.client_ip = "197.0.137.129"
 
         proto.language = REGION_LANG.get(str(region).upper(), "en")
 
@@ -656,11 +654,12 @@ async def build_majorlogin_payload(open_id, access_token, platform, client_versi
 
         full_payload = base_payload + extra
         return await aes_encrypt(full_payload, AES_KEY, AES_IV)
-    except Exception:
+    except Exception as e:
+        print_error(f"build_majorlogin_payload error: {e}")
         return None
 
 
-# ==================== TOKEN LOGIN PAYLOAD (login_by=3) ====================
+# ==================== TOKEN LOGIN PAYLOAD ====================
 async def build_token_login_payload(open_id, access_token, platform, client_version, device_info):
     try:
         proto = thunderFF_pb2.MajorLoginReq()
@@ -729,7 +728,8 @@ async def build_token_login_payload(open_id, access_token, platform, client_vers
 
         payload = proto.SerializeToString()
         return await aes_encrypt(payload, AES_KEY, AES_IV)
-    except Exception:
+    except Exception as e:
+        print_error(f"build_token_login_payload error: {e}")
         return None
 
 
@@ -741,9 +741,11 @@ async def send_majorlogin(data, release_version, server_url):
         req_headers["ReleaseVersion"] = str(release_version)
         response = await client.post(url, headers=req_headers, data=data)
         if response.status_code != 200:
+            print_error(f"MajorLogin HTTP {response.status_code}")
             return None
         response_content = response.content
         if len(response_content) < 40:
+            print_error(f"MajorLogin short response ({len(response_content)} bytes)")
             return None
 
         res_proto = thunderFF_pb2.MajorLoginRes()
@@ -807,7 +809,8 @@ async def send_majorlogin(data, release_version, server_url):
             except Exception: pass
 
         return res_proto
-    except Exception:
+    except Exception as e:
+        print_error(f"send_majorlogin error: {e}")
         return None
 
 
@@ -821,6 +824,7 @@ async def send_getlogin(data, base_url, token, release_version):
         req_headers['Host'] = "clientbp.ppmainecoonghj.com"
         response = await client.post(url, headers=req_headers, data=data)
         if response.status_code != 200:
+            print_error(f"GetLoginData HTTP {response.status_code}")
             return None
         response_content = response.content
 
@@ -916,7 +920,8 @@ async def send_getlogin(data, base_url, token, release_version):
             pass
 
         return res_proto, dict_res
-    except Exception:
+    except Exception as e:
+        print_error(f"send_getlogin error: {e}")
         return None
 
 
@@ -1504,7 +1509,7 @@ async def play_game(server_ip_port, thunder, sharma, udp_key, match_code,
 
 
 # ============================================================
-# functional_br — lvl.py এর হুবহু ম্যাচিং flow
+# functional_br — lvl.py হুবহু
 # ============================================================
 async def functional_br(addrs, starter_packet, account_region, client_version,
                         key, iv, account_id="", account_data=None,
@@ -2016,6 +2021,7 @@ async def process_account_uid_pass(uid: str, password: str, intended_region="BD"
             return None
 
         release_version, client_version, server_url = verconfig_res
+        print_info(f"[LOGIN] Release: {release_version}, Client: {client_version}")
 
         tokengrant_response = await get_access_token(uid, password)
         if tokengrant_response is None:
@@ -2023,11 +2029,10 @@ async def process_account_uid_pass(uid: str, password: str, intended_region="BD"
             return None
 
         open_id, access_token, platform = tokengrant_response
-
-        device_info = get_device_for_account(uid)
+        print_success(f"[LOGIN] OAuth OK — open_id: {str(open_id)[:20]}... platform: {platform}")
 
         login_payload_data = await build_majorlogin_payload(
-            open_id, access_token, platform, client_version, device_info, region=intended_region
+            open_id, access_token, platform, client_version, None, region=intended_region
         )
         if login_payload_data is None:
             print_error(f"Failed to build login payload for UID {uid}")
@@ -2037,6 +2042,7 @@ async def process_account_uid_pass(uid: str, password: str, intended_region="BD"
         if majorlogin_response is None:
             print_error(f"MajorLogin Request rejected by server for UID {uid}")
             return None
+        print_success(f"[LOGIN] MajorLogin OK — account_id: {majorlogin_response.account_id}, region: {majorlogin_response.region}")
 
         getlogin_result = await send_getlogin(login_payload_data, majorlogin_response.url, majorlogin_response.token, release_version)
         if getlogin_result is None:
@@ -2055,6 +2061,8 @@ async def process_account_uid_pass(uid: str, password: str, intended_region="BD"
         likes = int(get_proto_field(dict_res, 8, 0))
         nickname = res_proto.nickname or get_proto_field(dict_res, 4, f"Player_{acc_id}")
         region = majorlogin_response.region or get_proto_field(dict_res, 3, intended_region)
+
+        print_success(f"[LOGIN] GetLoginData OK — {nickname} Lv{level} ({region})")
 
         bot_state.register_account(
             uid=acc_id, nickname=nickname, region=region, level=level,
@@ -2098,7 +2106,12 @@ async def process_account_uid_pass(uid: str, password: str, intended_region="BD"
         cache_set(uid, account_data)
         return account_data
     except Exception as e:
+        import traceback
         print_error(f"process_account_uid_pass error: {e}")
+        try:
+            traceback.print_exc()
+        except Exception:
+            pass
         return None
 
 
@@ -2230,7 +2243,12 @@ async def process_account_token(access_token: str, intended_region="BD",
         cache_set(cache_key, account_data)
         return account_data
     except Exception as e:
+        import traceback
         print_error(f"process_account_token error: {e}")
+        try:
+            traceback.print_exc()
+        except Exception:
+            pass
         return None
 
 
@@ -2402,7 +2420,6 @@ async def main():
     print_info("Parallel Matches: UNLIMITED (background)")
     print_info(f"Cache TTL: {TOKEN_CACHE_TTL}s ({TOKEN_CACHE_TTL//60} min)")
     print_info(f"Priority Regions: {PRIORITY_REGIONS}")
-    print_info("Device System: 1 ID = 1 Persistent Device ID (devices.json)")
     print_colored("=" * 60, Colors.CYAN)
 
     try:
@@ -2411,7 +2428,6 @@ async def main():
     except Exception as e:
         print_error(f"Could not start web dashboard: {e}")
 
-    # Worker cancellation helper (fixes delete-but-worker-keeps-running bug)
     def _find_and_cancel_worker(uid: str) -> bool:
         if not uid:
             return False
