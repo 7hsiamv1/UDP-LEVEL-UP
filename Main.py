@@ -49,13 +49,15 @@ MODE_ID = 1
 MAP_ID = 1
 PRIORITY_REGIONS = ["BD", "IND", "SG", "TH", "PH", "VN", "MY", "ID", "HK", "TW"]
 
-FATIGUE_MATCH_THRESHOLD = 15
-FATIGUE_REST_MIN = 120.0
-FATIGUE_REST_MAX = 200.0
+# 🔥 lvl.py এর সাথে মিলিয়ে ফাস্ট anti-fatigue
+FATIGUE_MATCH_THRESHOLD = 20
+FATIGUE_REST_MIN = 90.0
+FATIGUE_REST_MAX = 150.0
 
-HOURLY_MATCH_LIMIT = 20
-GLOBAL_HOURLY_MATCH_LIMIT = 60
-_min_delay_between_matches = (4.0, 8.0)
+# 🔥 lvl.py তে এই rate-limit গুলো নেই — তাই effectively disabled
+HOURLY_MATCH_LIMIT = 999999
+GLOBAL_HOURLY_MATCH_LIMIT = 999999
+_min_delay_between_matches = (3.0, 3.0)
 
 MAX_CONSECUTIVE_PARSE_FAILURES = 5.0
 NON_MATCH_RECONNECT_DELAY = 0.5
@@ -710,18 +712,8 @@ async def build_majorlogin_payload(open_id, access_token, platform, client_versi
         return None
 
 
-# ==================== TOKEN LOGIN PAYLOAD (login_by=3) — FROM lvl.py ====================
+# ==================== TOKEN LOGIN PAYLOAD (login_by=3) ====================
 async def build_token_login_payload(open_id, access_token, platform, client_version, device_info):
-    """
-    Access-Token specific payload. Mirrors lvl.py exactly.
-    KEY DIFFERENCES from guest:
-      - login_by = 3, platform_sdk_id = 2
-      - telecom_operator = "Citycell"
-      - No top-level _pb_field extras (96, 97, ...)
-      - Different storage / library_path / extra_info / loading_time
-      - language always "en"
-      - analytics_detail set
-    """
     try:
         proto = thunderFF_pb2.MajorLoginReq()
         proto.event_time = str(datetime.now())[:-7]
@@ -730,7 +722,6 @@ async def build_token_login_payload(open_id, access_token, platform, client_vers
         proto.client_version = client_version
         proto.client_version_code = "2019121229"
 
-        # Persistent device injection
         proto.system_software = device_info.get("system_software", "Android OS 12 / API-31 (SP1A.210812.016.C2/user.dxu.20260701.180839)")
         proto.system_hardware = device_info.get("brand", "Handheld")
         proto.device_type = device_info.get("model", "Handheld")
@@ -756,8 +747,8 @@ async def build_token_login_payload(open_id, access_token, platform, client_vers
         proto.open_id_type = str(platform)
         proto.login_open_id_type = int(platform)
         proto.access_token = access_token
-        proto.login_by = 3                      # ← TOKEN-SPECIFIC
-        proto.platform_sdk_id = 2               # ← TOKEN-SPECIFIC
+        proto.login_by = 3
+        proto.platform_sdk_id = 2
         proto.origin_platform_type = str(platform)
         proto.primary_platform_type = str(platform)
         proto.reg_avatar = 1
@@ -788,14 +779,13 @@ async def build_token_login_payload(open_id, access_token, platform, client_vers
         proto.if_push = 1
         proto.is_vpn = 0
 
-        # 🔥 NO top-level _pb_field extras (critical for token login!)
         payload = proto.SerializeToString()
         return await aes_encrypt(payload, AES_KEY, AES_IV)
     except Exception:
         return None
 
 
-# ==================== MAJORLOGIN SEND (multi-offset fallback) ====================
+# ==================== MAJORLOGIN SEND ====================
 async def send_majorlogin(data, release_version, server_url):
     try:
         url = f"{server_url}MajorLogin" if server_url.endswith('/') else f"{server_url}/MajorLogin"
@@ -808,7 +798,6 @@ async def send_majorlogin(data, release_version, server_url):
         if len(response_content) < 40:
             return None
 
-        # 1. Direct parse
         res_proto = thunderFF_pb2.MajorLoginRes()
         try:
             res_proto.ParseFromString(response_content)
@@ -817,7 +806,6 @@ async def send_majorlogin(data, release_version, server_url):
         except Exception:
             pass
 
-        # 2. 64-byte header offset (OB55)
         if len(response_content) > 64:
             try:
                 candidate = thunderFF_pb2.MajorLoginRes()
@@ -827,7 +815,6 @@ async def send_majorlogin(data, release_version, server_url):
             except Exception:
                 pass
 
-        # 3. Dynamic offset search
         for offset in range(min(128, len(response_content))):
             try:
                 candidate = thunderFF_pb2.MajorLoginRes()
@@ -837,7 +824,6 @@ async def send_majorlogin(data, release_version, server_url):
             except Exception:
                 pass
 
-        # 4. Fallback with key/iv extraction
         res_proto = thunderFF_pb2.MajorLoginRes()
         try:
             res_proto.ParseFromString(response_content)
@@ -877,7 +863,7 @@ async def send_majorlogin(data, release_version, server_url):
         return None
 
 
-# ==================== GETLOGIN SEND (multi-offset fallback) ====================
+# ==================== GETLOGIN SEND ====================
 async def send_getlogin(data, base_url, token, release_version):
     try:
         url = f"{base_url.rstrip('/')}/GetLoginData"
@@ -910,7 +896,6 @@ async def send_getlogin(data, base_url, token, release_version):
                 except Exception:
                     pass
 
-        # Manual extraction helper
         def _extract_addr(raw_bytes, field_no):
             try:
                 pos = 0
@@ -1685,7 +1670,6 @@ async def functional_br(addrs, starter_packet, account_region, client_version,
                         print_error(f"start_game_battle_royale error: {e}")
                     last_start_time = asyncio.get_running_loop().time()
 
-                # 🎯 Target-Level Auto-Stop
                 if _target_reached(uid_str, target_level):
                     print_success(f"🎯 [TARGET] UID {uid_str} reached target level {target_level}. Stopping.")
                     try:
@@ -2285,10 +2269,8 @@ async def process_account_token(access_token: str, intended_region="BD",
             print_error("[TOKEN] open_id missing in inspect response")
             return None
 
-        # Persistent device keyed by open_id
         device_info = get_device_for_account(open_id)
 
-        # 🔥 USE TOKEN-SPECIFIC PAYLOAD BUILDER (login_by=3)
         login_payload_data = await build_token_login_payload(
             open_id, access_token, str(platform), client_version, device_info
         )
@@ -2550,6 +2532,47 @@ async def main():
     except Exception as e:
         print_error(f"Could not start web dashboard: {e}")
 
+    # 🔥 Helper: robust worker cancellation (handles key mismatches between dashboard
+    #    and internal worker dict — fixes "delete but worker keeps running" bug).
+    def _find_and_cancel_worker(uid: str) -> bool:
+        if not uid:
+            return False
+
+        # 1) Direct key match
+        if uid in bot_state.account_workers:
+            bot_state.account_workers.pop(uid).cancel()
+            return True
+
+        # 2) Look up credentials by account_id / auth_uid / tok_ prefix
+        matched_cred_keys = []
+        for cred_key, creds in list(bot_state.account_credentials.items()):
+            if not isinstance(creds, dict):
+                continue
+            if (str(creds.get('account_id')) == uid
+                    or str(creds.get('auth_uid')) == uid):
+                matched_cred_keys.append(cred_key)
+
+        # 3) Try every plausible worker key derived from matched credentials
+        for cred_key in matched_cred_keys:
+            creds = bot_state.account_credentials.get(cred_key) or {}
+            candidate_keys = set()
+            candidate_keys.add(cred_key)
+            if creds.get('auth_uid'):
+                candidate_keys.add(str(creds['auth_uid']))
+            if creds.get('auth_token'):
+                tok = str(creds['auth_token'])
+                candidate_keys.add(tok[:10])
+                candidate_keys.add(f"tok_{tok[:20]}")
+            if creds.get('account_id'):
+                candidate_keys.add(str(creds['account_id']))
+
+            for ck in candidate_keys:
+                if ck in bot_state.account_workers:
+                    bot_state.account_workers.pop(ck).cancel()
+                    return True
+
+        return False
+
     async def on_account_added_handler(data):
         region = str(data.get("region", "BD")).strip().upper() or "BD"
         owner_uid = data.get("owner_uid")
@@ -2583,10 +2606,12 @@ async def main():
 
     async def on_account_deleted_handler(data):
         uid = str(data.get("uid", "")).strip() if isinstance(data, dict) else str(data).strip()
-        if uid in bot_state.account_workers:
-            bot_state.account_workers[uid].cancel()
-            del bot_state.account_workers[uid]
+        if not uid:
+            return
+        if _find_and_cancel_worker(uid):
             print_warning(f"Account {uid} deleted via Web. Worker stopped.")
+        else:
+            print_warning(f"Account {uid} deleted via Web. No active worker found (already stopped?).")
 
     async def on_account_toggled_handler(data):
         if not isinstance(data, dict):
@@ -2595,9 +2620,7 @@ async def main():
         action = data.get("action")
         if uid and action:
             if action == "pause":
-                if uid in bot_state.account_workers:
-                    bot_state.account_workers[uid].cancel()
-                    del bot_state.account_workers[uid]
+                if _find_and_cancel_worker(uid):
                     try: bot_state.update_status(uid, "PAUSED")
                     except: pass
                     print_warning(f"Account {uid} paused via Web.")
