@@ -9,7 +9,7 @@ import json
 import os
 import time
 import httpx
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Tuple
 from aiohttp import web
 
 # ==================== FIREBASE CONFIG ====================
@@ -312,7 +312,6 @@ def _filter_logs_for_user(user: Dict[str, Any]) -> List[Dict[str, Any]]:
         the user's own FreeFire account UIDs (fallback).
     """
     uid = user["uid"]
-    # Build set of this user's FreeFire UIDs for fallback matching
     own_uids = {str(a.get("uid")) for a in bot_state.accounts.values()
                 if a.get("owner_uid") == uid and a.get("uid")}
     own_uids.discard("")
@@ -323,7 +322,6 @@ def _filter_logs_for_user(user: Dict[str, Any]) -> List[Dict[str, Any]]:
         if l.get("owner_uid") == uid:
             out.append(l)
             continue
-        # Fallback: unowned log mentioning one of the user's UIDs
         if not l.get("owner_uid") and own_uids:
             msg = str(l.get("message", ""))
             for u in own_uids:
