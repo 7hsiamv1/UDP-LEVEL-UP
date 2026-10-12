@@ -1,255 +1,486 @@
-# dashboard_server.py
+# -*- coding: utf-8 -*-
 """
-Per-user isolated dashboard + stats pusher for Railway.
+FreeFire Level Up Bot - Dashboard Server
+Firebase Auth + Per-User Isolation + Admin Panel + Realtime DB Sync
 """
+
 import asyncio
+import json
+import os
 import time
-import traceback
+import httpx
 from typing import Dict, List, Any, Optional
 from aiohttp import web
 
-import web_api
+# ==================== FIREBASE CONFIG ====================
+FIREBASE_CONFIG = {
+    "apiKey": "AIzaSyD3XuX0-zuV0nbiZAjY7mnqNBvyshh-cns",
+    "authDomain": "trust--tournament.firebaseapp.com",
+    "databaseURL": "https://trust--tournament-default-rtdb.firebaseio.com",
+    "projectId": "trust--tournament",
+    "storageBucket": "trust--tournament.appspot.com",
+    "messagingSenderId": "952470695005",
+    "appId": "1:952470695005:web:4e0fe64b9b6afcfb8a71b4",
+    "measurementId": "G-WS83KRQQYC"
+}
 
+ADMIN_EMAILS = set(e.strip().lower() for e in os.environ.get("ADMIN_EMAILS", "").split(",") if e.strip())
 
+# ==================== BOT STATE ====================
 class BotState:
     def __init__(self):
         self.accounts: Dict[str, Dict[str, Any]] = {}
-        self.logs: Dict[str, List[Dict[str, Any]]] = {}
-        self.max_logs = 200
+        self.logs: List[Dict[str, Any]] = []
+        self.max_logs = 800
+        self.total_matches = 0
+        self.total_gained_exp = 0
         self.start_time = time.time()
         self.account_workers: Dict[str, asyncio.Task] = {}
-        self.account_meta: Dict[str, Dict[str, Any]] = {}
+        self.refresh_callbacks: Dict[str, Any] = {}
         self.account_credentials: Dict[str, Dict[str, Any]] = {}
+        # auth_key -> owner firebase uid
+        self.account_owners: Dict[str, str] = {}
 
-    def _key(self, user_id: int, bot_id: int) -> str:
-        return f"u{user_id}_b{bot_id}"
+    def set_owner(self, auth_key: str, owner_uid: str):
+        self.account_owners[str(auth_key)] = str(owner_uid)
 
-    def log(self, message: str, level: str = "info",
-            user_id: Optional[int] = None, bot_id: Optional[int] = None,
-            uid: Optional[str] = None):
-        entry = {"time": time.strftime("%H:%M:%S"), "level": level,
-                 "message": message, "uid": uid}
-        if user_id and bot_id:
-            k = self._key(user_id, bot_id)
-            self.logs.setdefault(k, []).append(entry)
-            if len(self.logs[k]) > self.max_logs:
-                self.logs[k].pop(0)
-            asyncio.create_task(web_api.report_log(user_id, bot_id, level, message))
-        else:
-            self.logs.setdefault("_system", []).append(entry)
-            if len(self.logs["_system"]) > self.max_logs:
-                self.logs["_system"].pop(0)
-        try:
-            print(f"[{level.upper()}] {message}")
-        except Exception:
-            pass
+    def get_owner(self, auth_uid: str = "", auth_token: str = "") -> Optional[str]:
+        if auth_uid and str(auth_uid) in self.account_owners:
+            return self.account_owners[str(auth_uid)]
+        if auth_token:
+            key = f"tok_{str(auth_token)[:20]}"
+            if key in self.account_owners:
+                return self.account_owners[key]
+        return None
 
-    def register_account(self, user_id: int, bot_id: int, uid: str, nickname: str,
-                         region: str, level: int, exp: int, likes: int = 0,
-                         login_uid: str = ""):
-        k = self._key(user_id, bot_id)
-        self.account_meta[k] = {"user_id": user_id, "bot_id": bot_id}
-        if k not in self.accounts:
-            self.accounts[k] = {
-                "user_id": user_id, "bot_id": bot_id,
-                "uid": uid, "login_uid": login_uid,
-                "nickname": nickname or f"Player_{uid[:6]}",
-                "region": region or "BD", "level": level or 1,
-                "initial_exp": exp, "current_exp": exp, "gained_exp": 0,
-                "likes": likes or 0, "status": "ONLINE",
-                "matches_played": 0, "active_matches": 0,
+    def log(self, message: str, level: str = "info", uid: Optional[str] = None):
+        entry = {
+            "time": time.strftime("%H:%M:%S"),
+            "level": level,
+            "message": message,
+            "uid": uid,
+            "owner_uid": None,
+            "ts": time.time(),
+        }
+        if uid and str(uid) in self.accounts:
+            entry["owner_uid"] = self.accounts[str(uid)].get("owner_uid")
+        self.logs.append(entry)
+        if len(self.logs) > self.max_logs:
+            self.logs.pop(0)
+
+    def register_account(self, uid: str, nickname: str, region: str, level: int, exp: int,
+                         likes: int = 0, owner_uid: Optional[str] = None, target_level: int = 0):
+        uid_str = str(uid)
+        if uid_str not in self.accounts:
+            self.accounts[uid_str] = {
+                "uid": uid_str,
+                "nickname": nickname or f"Player_{uid_str[:6]}",
+                "region": region or "BD",
+                "level": level or 1,
+                "initial_exp": exp,
+                "current_exp": exp,
+                "gained_exp": 0,
+                "likes": likes or 0,
+                "status": "ONLINE",
+                "matches_played": 0,
+                "active_matches": 0,
                 "last_match_time": None,
                 "last_updated": time.strftime("%H:%M:%S"),
+                "owner_uid": owner_uid,
+                "target_level": target_level,
             }
-            print(f"[REGISTER] NEW user={user_id} bot={bot_id} server_uid={uid} login_uid={login_uid} nickname={nickname}")
         else:
-            a = self.accounts[k]
-            if nickname: a["nickname"] = nickname
-            if region: a["region"] = region
-            if level: a["level"] = level
-            if login_uid: a["login_uid"] = login_uid
-            a["current_exp"] = exp
-            a["gained_exp"] = max(0, exp - a["initial_exp"])
-            a["likes"] = likes
-            a["status"] = "ONLINE"
-            a["last_updated"] = time.strftime("%H:%M:%S")
+            acc = self.accounts[uid_str]
+            if nickname: acc["nickname"] = nickname
+            if region: acc["region"] = region
+            if level: acc["level"] = level
+            if owner_uid: acc["owner_uid"] = owner_uid
+            if target_level: acc["target_level"] = target_level
+            acc["current_exp"] = exp
+            acc["gained_exp"] = max(0, exp - acc["initial_exp"])
+            acc["likes"] = likes
+            acc["status"] = "ONLINE"
+            acc["last_updated"] = time.strftime("%H:%M:%S")
+        self.recalc_totals()
 
-    def update_exp(self, user_id: int, bot_id: int, current_exp: int, level: Optional[int] = None):
-        k = self._key(user_id, bot_id)
-        if k not in self.accounts: return
-        a = self.accounts[k]
-        a["current_exp"] = current_exp
-        if level and level > 0: a["level"] = level
-        a["gained_exp"] = max(0, current_exp - a["initial_exp"])
-        a["last_updated"] = time.strftime("%H:%M:%S")
+    def update_exp(self, uid: str, current_exp: int, level: Optional[int] = None):
+        uid_str = str(uid)
+        if uid_str in self.accounts:
+            acc = self.accounts[uid_str]
+            old_exp = acc["current_exp"]
+            acc["current_exp"] = current_exp
+            if level is not None and level > 0:
+                acc["level"] = level
+            acc["gained_exp"] = max(0, current_exp - acc["initial_exp"])
+            acc["last_updated"] = time.strftime("%H:%M:%S")
+            diff = current_exp - old_exp
+            if diff > 0:
+                self.log(f"Account {acc['nickname']} ({uid_str}) gained +{diff} EXP! Total: +{acc['gained_exp']}", "success", uid_str)
+            self.recalc_totals()
 
-    def update_status(self, user_id: int, bot_id: int, status: str, active_matches: Optional[int] = None):
-        k = self._key(user_id, bot_id)
-        if k not in self.accounts: return
-        a = self.accounts[k]
-        a["status"] = status
-        if active_matches is not None: a["active_matches"] = active_matches
-        a["last_updated"] = time.strftime("%H:%M:%S")
+    def update_status(self, uid: str, status: str, active_matches: Optional[int] = None):
+        uid_str = str(uid)
+        if uid_str in self.accounts:
+            self.accounts[uid_str]["status"] = status
+            if active_matches is not None:
+                self.accounts[uid_str]["active_matches"] = active_matches
+            self.accounts[uid_str]["last_updated"] = time.strftime("%H:%M:%S")
 
-    def increment_match(self, user_id: int, bot_id: int):
-        k = self._key(user_id, bot_id)
-        if k not in self.accounts: return
-        a = self.accounts[k]
-        a["matches_played"] += 1
-        a["last_match_time"] = time.strftime("%H:%M:%S")
-        a["last_updated"] = time.strftime("%H:%M:%S")
+    def increment_match(self, uid: str):
+        uid_str = str(uid)
+        self.total_matches += 1
+        if uid_str in self.accounts:
+            self.accounts[uid_str]["matches_played"] += 1
+            self.accounts[uid_str]["last_match_time"] = time.strftime("%H:%M:%S")
+            self.accounts[uid_str]["last_updated"] = time.strftime("%H:%M:%S")
+            self.log(f"Account {self.accounts[uid_str]['nickname']} finished Match #{self.accounts[uid_str]['matches_played']}", "info", uid_str)
 
-    async def push_stats(self, user_id: int, bot_id: int):
-        k = self._key(user_id, bot_id)
-        a = self.accounts.get(k)
-        if not a:
-            print(f"[PUSH-STATS] ❌ No account user={user_id} bot={bot_id}")
-            return
-        payload = {
-            "nickname":        a["nickname"],
-            "account_id":      a.get("uid"),          # server UID from MajorLogin
-            "login_uid":       a.get("login_uid"),    # guest UID user entered
-            "level":           a["level"],
-            "initial_exp":     a["initial_exp"],
-            "current_exp":     a["current_exp"],
-            "gained_exp":      a["gained_exp"],
-            "likes":           a["likes"],
-            "status":          a["status"],
-            "matches_played":  a["matches_played"],
-            "active_matches":  a["active_matches"],
-            "last_match_time": a["last_match_time"],
-        }
-        print(f"[PUSH-STATS] user={user_id} bot={bot_id} server_uid={a.get('uid')} "
-              f"login_uid={a.get('login_uid')} status={a['status']} "
-              f"gained={a['gained_exp']} matches={a['matches_played']}")
-        await web_api.report_stats(bot_id, payload)
+    def recalc_totals(self):
+        self.total_gained_exp = sum(acc.get("gained_exp", 0) for acc in self.accounts.values())
 
 
 bot_state = BotState()
 
 
-# ==================== SYNC LOOP ====================
-_sync_lock = asyncio.Lock()
+# ==================== FIREBASE HELPERS ====================
+_token_cache: Dict[str, Dict[str, Any]] = {}
+_TOKEN_TTL = 300.0
+
+async def verify_id_token(id_token: str) -> Optional[Dict[str, Any]]:
+    if not id_token:
+        return None
+    now = time.time()
+    cached = _token_cache.get(id_token)
+    if cached and now < cached["exp"]:
+        return cached["data"]
+    try:
+        url = f"https://identitytoolkit.googleapis.com/v1/accounts:lookup?key={FIREBASE_CONFIG['apiKey']}"
+        async with httpx.AsyncClient(timeout=10.0) as c:
+            r = await c.post(url, json={"idToken": id_token})
+            if r.status_code != 200:
+                return None
+            data = r.json()
+            users = data.get("users", [])
+            if not users:
+                return None
+            u = users[0]
+            result = {"uid": u["localId"], "email": u.get("email", "").lower()}
+            _token_cache[id_token] = {"exp": now + _TOKEN_TTL, "data": result}
+            return result
+    except Exception:
+        return None
 
 
-async def _sync_loop():
-    from Main import account_loop_guest, account_loop_token
-    await asyncio.sleep(3)
-
-    while True:
-        cycle_start = time.time()
-        try:
-            async with _sync_lock:
-                print(f"\n[SYNC] ══ Cycle start ══")
-                users = await web_api.pull_users()
-                print(f"[SYNC] Pulled {len(users)} users")
-
-                active_keys = set()
-
-                # STEP 1: Start workers
-                for u in users:
-                    user_id = int(u["user_id"])
-                    username = u.get("username", f"user{user_id}")
-                    bots = u.get("bots", [])
-                    print(f"[SYNC] User {user_id} ({username}) → {len(bots)} bots")
-
-                    for b in bots:
-                        bot_id = int(b["id"])
-                        k = bot_state._key(user_id, bot_id)
-                        active_keys.add(k)
-
-                        existing = bot_state.account_workers.get(k)
-                        if existing and not existing.done():
-                            continue  # already running
-
-                        bot_state.account_meta[k] = {
-                            "user_id": user_id, "bot_id": bot_id, "username": username,
-                        }
-
-                        if b.get("access_token"):
-                            print(f"[SYNC] 🚀 TOKEN worker for {username} bot #{bot_id}")
-                            task = asyncio.create_task(account_loop_token(
-                                b["access_token"], user_id, bot_id,
-                                region=b.get("region", "BD")
-                            ))
-                            bot_state.account_workers[k] = task
-                        elif b.get("uid") and b.get("password"):
-                            print(f"[SYNC] 🚀 GUEST worker for {username} bot #{bot_id} (UID: {b['uid']})")
-                            task = asyncio.create_task(account_loop_guest(
-                                b["uid"], b["password"], user_id, bot_id,
-                                region=b.get("region", "BD")
-                            ))
-                            bot_state.account_workers[k] = task
-                        else:
-                            print(f"[SYNC] ⚠️ Bot {bot_id} no credentials")
-
-                # STEP 2: Stop removed workers
-                for k in list(bot_state.account_workers.keys()):
-                    if k not in active_keys:
-                        task = bot_state.account_workers[k]
-                        if not task.done():
-                            task.cancel()
-                        del bot_state.account_workers[k]
-                        meta = bot_state.account_meta.get(k, {})
-                        print(f"[SYNC] 🛑 Stopped worker user={meta.get('user_id')} bot={meta.get('bot_id')}")
-                        bot_state.account_meta.pop(k, None)
-
-                # STEP 3: Cleanup stale accounts
-                for k in list(bot_state.accounts.keys()):
-                    if k not in active_keys:
-                        meta = bot_state.account_meta.get(k) or bot_state.accounts[k]
-                        print(f"[SYNC] 🧹 Cleanup user={meta.get('user_id')} bot={meta.get('bot_id')}")
-                        del bot_state.accounts[k]
-
-                # STEP 4: Push stats
-                if bot_state.accounts:
-                    print(f"[SYNC] Pushing stats for {len(bot_state.accounts)} account(s)")
-                    for k, a in list(bot_state.accounts.items()):
-                        try:
-                            await bot_state.push_stats(a["user_id"], a["bot_id"])
-                        except Exception as e:
-                            print(f"[SYNC] ❌ push_stats {k}: {e}")
-                else:
-                    print(f"[SYNC] No active accounts to push")
-
-                print(f"[SYNC] ══ Cycle done in {time.time()-cycle_start:.2f}s ══\n")
-
-        except Exception as e:
-            print(f"[SYNC] ❌ Loop error: {type(e).__name__}: {e}")
-            traceback.print_exc()
-
-        await asyncio.sleep(20)
+async def fb_set(path: str, data: Any, id_token: str) -> bool:
+    try:
+        url = f"{FIREBASE_CONFIG['databaseURL']}/{path}.json?auth={id_token}"
+        async with httpx.AsyncClient(timeout=8.0) as c:
+            r = await c.put(url, json=data)
+            return r.status_code == 200
+    except Exception:
+        return False
 
 
-# ==================== DEBUG HTTP SERVER ====================
-async def handle_root(request):
-    return web.Response(text="7H SIAM Bot Engine Running")
+async def fb_patch(path: str, data: Any, id_token: str) -> bool:
+    try:
+        url = f"{FIREBASE_CONFIG['databaseURL']}/{path}.json?auth={id_token}"
+        async with httpx.AsyncClient(timeout=8.0) as c:
+            r = await c.patch(url, json=data)
+            return r.status_code == 200
+    except Exception:
+        return False
 
-async def handle_health(request):
-    return web.Response(text="OK")
 
-async def handle_stats(request):
+async def fb_delete(path: str, id_token: str) -> bool:
+    try:
+        url = f"{FIREBASE_CONFIG['databaseURL']}/{path}.json?auth={id_token}"
+        async with httpx.AsyncClient(timeout=8.0) as c:
+            r = await c.delete(url)
+            return r.status_code == 200
+    except Exception:
+        return False
+
+
+# ==================== AUTH MIDDLEWARE ====================
+@web.middleware
+async def auth_mw(request: web.Request, handler):
+    if request.path in ("/", "/admin") or request.path.startswith("/static"):
+        return await handler(request)
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        return web.json_response({"status": "error", "error": "Unauthorized"}, status=401)
+    token = auth[7:].strip()
+    user = await verify_id_token(token)
+    if not user:
+        return web.json_response({"status": "error", "error": "Invalid/Expired Token"}, status=401)
+    request["user"] = user
+    request["id_token"] = token
+    return await handler(request)
+
+
+def is_admin(user: Dict[str, Any]) -> bool:
+    return user.get("email", "").lower() in ADMIN_EMAILS
+
+
+# ==================== HTTP HANDLERS ====================
+TEMPLATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates")
+
+async def handle_index(request: web.Request) -> web.Response:
+    path = os.path.join(TEMPLATE_DIR, "index.html")
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as f:
+            return web.Response(text=f.read(), content_type="text/html", charset="utf-8")
+    return web.Response(text="<h1>templates/index.html missing</h1>", content_type="text/html")
+
+
+async def handle_admin(request: web.Request) -> web.Response:
+    path = os.path.join(TEMPLATE_DIR, "admin.html")
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as f:
+            return web.Response(text=f.read(), content_type="text/html", charset="utf-8")
+    return web.Response(text="<h1>templates/admin.html missing</h1>", content_type="text/html")
+
+
+def _filter_accounts_for_user(user: Dict[str, Any]) -> List[Dict[str, Any]]:
+    uid = user["uid"]
+    return [a for a in bot_state.accounts.values() if a.get("owner_uid") == uid]
+
+
+async def handle_get_stats(request: web.Request) -> web.Response:
+    user = request["user"]
+    if is_admin(user):
+        accounts_data = list(bot_state.accounts.values())
+        logs = bot_state.logs[-120:]
+    else:
+        accounts_data = _filter_accounts_for_user(user)
+        logs = [l for l in bot_state.logs if l.get("owner_uid") == user["uid"]][-80:]
+
+    accounts_data.sort(key=lambda x: x.get("gained_exp", 0), reverse=True)
     return web.json_response({
-        "total_workers":  len(bot_state.account_workers),
-        "total_accounts": len(bot_state.accounts),
-        "accounts":       list(bot_state.accounts.values()),
-        "uptime":         int(time.time() - bot_state.start_time),
+        "total_accounts": len(accounts_data),
+        "total_matches": sum(a.get("matches_played", 0) for a in accounts_data),
+        "total_gained_exp": sum(a.get("gained_exp", 0) for a in accounts_data),
+        "accounts": accounts_data,
+        "logs": logs,
+        "uptime": int(time.time() - bot_state.start_time),
+        "is_admin": is_admin(user),
+        "user": {"uid": user["uid"], "email": user.get("email", "")}
     })
 
 
+async def handle_add_account(request: web.Request) -> web.Response:
+    try:
+        user = request["user"]
+        id_token = request["id_token"]
+        data = await request.json()
+        region = str(data.get("region", "BD")).strip().upper() or "BD"
+        target_level = int(data.get("target_level", 0) or 0)
+
+        accounts_file = "accounts.json"
+        existing = []
+        if os.path.exists(accounts_file):
+            try:
+                with open(accounts_file, "r", encoding="utf-8") as f:
+                    existing = json.load(f) or []
+            except Exception:
+                existing = []
+
+        if "uid" in data and "password" in data:
+            uid = str(data["uid"]).strip()
+            pwd = str(data["password"]).strip()
+            if not uid or not pwd:
+                return web.json_response({"status": "error", "error": "UID & Password required"})
+            existing = [a for a in existing if str(a.get("uid")) != uid]
+            entry = {"uid": uid, "password": pwd, "region": region,
+                     "target_level": target_level, "owner_uid": user["uid"]}
+            existing.append(entry)
+            auth_key = uid
+            payload = {"uid": uid, "password": pwd, "region": region, "target_level": target_level}
+        elif "token" in data:
+            token = str(data["token"]).strip()
+            if not token:
+                return web.json_response({"status": "error", "error": "Token required"})
+            existing = [a for a in existing if a.get("token") != token]
+            entry = {"token": token, "region": region,
+                     "target_level": target_level, "owner_uid": user["uid"]}
+            existing.append(entry)
+            auth_key = f"tok_{token[:20]}"
+            payload = {"token": token, "region": region, "target_level": target_level}
+        else:
+            return web.json_response({"status": "error", "error": "Invalid payload"})
+
+        with open(accounts_file, "w", encoding="utf-8") as f:
+            json.dump(existing, f, indent=2)
+
+        bot_state.set_owner(auth_key, user["uid"])
+        safe_key = auth_key.replace(".", "_").replace("@", "_").replace("$", "_").replace("#", "_").replace("[", "_").replace("]", "_").replace("/", "_")
+        entry_meta = dict(payload)
+        entry_meta["auth_key"] = auth_key
+        entry_meta["owner_uid"] = user["uid"]
+        entry_meta["added_at"] = int(time.time())
+        await fb_set(f"user_accounts/{user['uid']}/{safe_key}", entry_meta, id_token)
+
+        bot_state.log(f"New account added: {data.get('uid') or 'Token'}", "success")
+
+        if "on_account_added" in bot_state.refresh_callbacks:
+            asyncio.create_task(bot_state.refresh_callbacks["on_account_added"]({**data, "owner_uid": user["uid"], "target_level": target_level, "region": region}))
+
+        return web.json_response({"status": "ok"})
+    except Exception as e:
+        return web.json_response({"status": "error", "error": str(e)})
+
+
+async def handle_delete_account(request: web.Request) -> web.Response:
+    try:
+        user = request["user"]
+        id_token = request["id_token"]
+        data = await request.json()
+        uid = str(data.get("uid", "")).strip()
+        auth_key = data.get("auth_key", "")
+
+        accounts_file = "accounts.json"
+        existing = []
+        if os.path.exists(accounts_file):
+            with open(accounts_file, "r", encoding="utf-8") as f:
+                existing = json.load(f) or []
+
+        # Only owner or admin can delete
+        def is_owned(entry):
+            if is_admin(user):
+                return True
+            return entry.get("owner_uid") == user["uid"]
+
+        new_list = []
+        for a in existing:
+            aid = str(a.get("uid") or a.get("token", "")[:20])
+            if aid == uid or a.get("token") == data.get("token"):
+                if not is_owned(a):
+                    continue
+                ak = a.get("uid") or f"tok_{a.get('token','')[:20]}"
+                bot_state.account_owners.pop(str(ak), None)
+                if a.get("owner_uid"):
+                    safe_key = str(ak).replace(".", "_").replace("@", "_").replace("$", "_").replace("#", "_").replace("[", "_").replace("]", "_").replace("/", "_")
+                    await fb_delete(f"user_accounts/{a['owner_uid']}/{safe_key}", id_token)
+            else:
+                new_list.append(a)
+
+        with open(accounts_file, "w", encoding="utf-8") as f:
+            json.dump(new_list, f, indent=2)
+
+        if uid in bot_state.accounts:
+            if is_admin(user) or bot_state.accounts[uid].get("owner_uid") == user["uid"]:
+                del bot_state.accounts[uid]
+
+        if uid in bot_state.account_workers:
+            bot_state.account_workers[uid].cancel()
+            del bot_state.account_workers[uid]
+
+        bot_state.log(f"Account {uid} removed.", "warning", uid)
+        return web.json_response({"status": "ok"})
+    except Exception as e:
+        return web.json_response({"status": "error", "error": str(e)})
+
+
+async def handle_refresh_account(request: web.Request) -> web.Response:
+    try:
+        user = request["user"]
+        data = await request.json()
+        uid = str(data.get("uid", "")).strip()
+        if not is_admin(user):
+            acc = bot_state.accounts.get(uid)
+            if acc and acc.get("owner_uid") != user["uid"]:
+                return web.json_response({"status": "error", "error": "Forbidden"}, status=403)
+        if "on_refresh_account" in bot_state.refresh_callbacks:
+            asyncio.create_task(bot_state.refresh_callbacks["on_refresh_account"](uid))
+        return web.json_response({"status": "ok"})
+    except Exception as e:
+        return web.json_response({"status": "error", "error": str(e)})
+
+
+async def handle_toggle_account(request: web.Request) -> web.Response:
+    try:
+        user = request["user"]
+        data = await request.json()
+        uid = str(data.get("uid", "")).strip()
+        action = data.get("action", "")
+        if not is_admin(user):
+            acc = bot_state.accounts.get(uid)
+            if acc and acc.get("owner_uid") != user["uid"]:
+                return web.json_response({"status": "error", "error": "Forbidden"}, status=403)
+        if "on_account_toggled" in bot_state.refresh_callbacks:
+            asyncio.create_task(bot_state.refresh_callbacks["on_account_toggled"]({"uid": uid, "action": action}))
+        return web.json_response({"status": "ok"})
+    except Exception as e:
+        return web.json_response({"status": "error", "error": str(e)})
+
+
+async def handle_toggle_all(request: web.Request) -> web.Response:
+    try:
+        user = request["user"]
+        data = await request.json()
+        action = data.get("action", "pause")
+        if "on_toggle_all" in bot_state.refresh_callbacks:
+            asyncio.create_task(bot_state.refresh_callbacks["on_toggle_all"]({"action": action, "owner_uid": user["uid"], "is_admin": is_admin(user)}))
+        return web.json_response({"status": "ok"})
+    except Exception as e:
+        return web.json_response({"status": "error", "error": str(e)})
+
+
+# ==================== ADMIN ENDPOINTS ====================
+async def handle_admin_whoami(request: web.Request) -> web.Response:
+    user = request["user"]
+    return web.json_response({
+        "is_admin": is_admin(user),
+        "email": user.get("email", ""),
+        "uid": user["uid"]
+    })
+
+
+async def handle_admin_overview(request: web.Request) -> web.Response:
+    user = request["user"]
+    if not is_admin(user):
+        return web.json_response({"status": "error", "error": "Admin only"}, status=403)
+
+    # Group by owner
+    owners: Dict[str, Dict[str, Any]] = {}
+    for a in bot_state.accounts.values():
+        owner = a.get("owner_uid") or "unknown"
+        if owner not in owners:
+            owners[owner] = {"owner_uid": owner, "accounts": [], "total_matches": 0, "total_exp": 0}
+        owners[owner]["accounts"].append(a)
+        owners[owner]["total_matches"] += a.get("matches_played", 0)
+        owners[owner]["total_exp"] += a.get("gained_exp", 0)
+
+    return web.json_response({
+        "status": "ok",
+        "total_users": len(owners),
+        "total_accounts": len(bot_state.accounts),
+        "total_matches": bot_state.total_matches,
+        "total_gained_exp": bot_state.total_gained_exp,
+        "total_active_workers": len(bot_state.account_workers),
+        "owners": list(owners.values()),
+        "recent_logs": bot_state.logs[-200:],
+        "uptime": int(time.time() - bot_state.start_time),
+    })
+
+
+# ==================== SERVER STARTUP ====================
 async def start_web_dashboard(host: str = "0.0.0.0", port: int = 5000):
-    app = web.Application()
-    app.router.add_get("/", handle_root)
-    app.router.add_get("/health", handle_health)
-    app.router.add_get("/api/stats", handle_stats)
+    app = web.Application(middlewares=[auth_mw])
+    app.router.add_get("/", handle_index)
+    app.router.add_get("/admin", handle_admin)
+    app.router.add_get("/api/stats", handle_get_stats)
+    app.router.add_post("/api/account/add", handle_add_account)
+    app.router.add_post("/api/account/delete", handle_delete_account)
+    app.router.add_post("/api/account/refresh", handle_refresh_account)
+    app.router.add_post("/api/account/toggle", handle_toggle_account)
+    app.router.add_post("/api/account/toggle_all", handle_toggle_all)
+    app.router.add_get("/api/admin/whoami", handle_admin_whoami)
+    app.router.add_get("/api/admin/overview", handle_admin_overview)
 
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, host, port)
     await site.start()
-
-    print(f"\033[92m[+] Debug: http://localhost:{port}/api/stats\033[0m")
-    print(f"\033[92m[+] Health: http://localhost:{port}/health\033[0m")
-
-    asyncio.create_task(_sync_loop())
-    print(f"\033[92m[+] Sync loop started (20s interval)\033[0m")
+    print(f"\033[92m[+] Web Dashboard: http://localhost:{port}\033[0m")
+    print(f"\033[92m[+] Admin Panel  : http://localhost:{port}/admin\033[0m")
