@@ -42,25 +42,25 @@ DEVICES_FILE = "devices.json"
 TOKEN_CACHE_TTL = 1200
 
 # 🔥 Match control
-START_MATCH_INTERVAL = 3.0              # নিরাপদ ব্যবধান (প্যাকেট স্প্যাম রোধ)
-NEW_MATCH_DELAY = 10.0                  # (fallback; আসল delay random হবে 10-22s)
+START_MATCH_INTERVAL = 3.0
+NEW_MATCH_DELAY = 10.0
 MAX_MATCH_DURATION = 1500
-MATCH_IDLE_TIMEOUT = 5.0                # UDP ম্যাচ সেশনের স্বাভাবিক আইডল সময়
+MATCH_IDLE_TIMEOUT = 5.0
 MODE_ID = 1
 MAP_ID = 1
 PRIORITY_REGIONS = ["BD", "IND", "SG", "TH", "PH", "VN", "MY", "ID", "HK", "TW"]
 
-# 🛑 স্মার্ট অ্যান্টি-ফ্যাটিগ সিস্টেম কনফিগারেশন
-FATIGUE_MATCH_THRESHOLD = 8             # প্রতি ৮টি ম্যাচ কিউ হওয়ার পর বিরতি
-FATIGUE_REST_MIN = 240.0                # ন্যূনতম ৪ মিনিট (240 সেকেন্ড)
-FATIGUE_REST_MAX = 420.0                # সর্বোচ্চ ৭ মিনিট (420 সেকেন্ড)
+# 🛑 Anti-Fatigue System
+FATIGUE_MATCH_THRESHOLD = 8
+FATIGUE_REST_MIN = 240.0
+FATIGUE_REST_MAX = 420.0
 
-# ⏱️ Per-account hourly rate limit (IP-burst সীমিত করার জন্য)
-HOURLY_MATCH_LIMIT = 12                 # এক ঘণ্টায় সর্বোচ্চ ১২ ম্যাচ (per account)
-GLOBAL_HOURLY_MATCH_LIMIT = 40          # সব মিলিয়ে ঘণ্টায় ৪০ ম্যাচ
-_min_delay_between_matches = (10.0, 22.0)  # NEW_MATCH_DELAY এর random range
+# ⏱️ Hourly rate limit
+HOURLY_MATCH_LIMIT = 12
+GLOBAL_HOURLY_MATCH_LIMIT = 40
+_min_delay_between_matches = (10.0, 22.0)
 
-# 🔥 Cache invalidation thresholds
+# 🔥 Cache invalidation
 MAX_CONSECUTIVE_PARSE_FAILURES = 5.0
 NON_MATCH_RECONNECT_DELAY = 0.5
 
@@ -68,8 +68,8 @@ FALLBACK_UID = ""
 FALLBACK_PASSWORD = ""
 
 # 🧠 Anti-ban tracking dicts
-_hourly_matches: Dict[str, Dict[str, int]] = {}    # uid -> {"hour_key": count}
-_global_hourly: Dict[str, int] = {}                # hour_key -> count
+_hourly_matches: Dict[str, Dict[str, int]] = {}
+_global_hourly: Dict[str, int] = {}
 _rate_lock = asyncio.Lock()
 
 
@@ -105,7 +105,7 @@ def _pb_field(f, v):
     return b""
 
 
-# ==================== ULTRA SAFE PERSISTENT DEVICE RANDOMIZER ====================
+# ==================== PERSISTENT DEVICE RANDOMIZER ====================
 def get_device_for_account(account_identifier: str) -> dict:
     devices = {}
     if os.path.exists(DEVICES_FILE):
@@ -116,7 +116,6 @@ def get_device_for_account(account_identifier: str) -> dict:
             pass
 
     acc_key = str(account_identifier)
-
     if acc_key in devices:
         return devices[acc_key]
 
@@ -146,7 +145,6 @@ def get_device_for_account(account_identifier: str) -> dict:
     }
 
     devices[acc_key] = new_device
-
     try:
         with open(DEVICES_FILE, "w", encoding="utf-8") as f:
             json.dump(devices, f, indent=4)
@@ -156,7 +154,7 @@ def get_device_for_account(account_identifier: str) -> dict:
     return new_device
 
 
-# ==================== CLOUDFLARE DNS RESOLVER & SOCKET OPTIMIZERS ====================
+# ==================== CLOUDFLARE DNS & SOCKET ====================
 CLOUDFLARE_PRIMARY_DNS = "1.1.1.1"
 CLOUDFLARE_SECONDARY_DNS = "1.0.0.1"
 _DNS_CACHE: Dict[str, Tuple[str, float]] = {}
@@ -408,7 +406,6 @@ async def _check_hourly_limit(uid: str) -> Tuple[bool, float]:
     now = time.time()
     hkey = str(int(now // 3600))
     async with _rate_lock:
-        # prune old hour buckets
         for k in list(_global_hourly.keys()):
             if k != hkey:
                 _global_hourly.pop(k, None)
@@ -537,8 +534,7 @@ def cache_invalidate(uid: str):
         print_warning(f"[CACHE] Invalidated: {uid}")
 
 
-# ==================== ENCRYPTION & PROTOBUF ====================
-
+# ==================== ENCRYPTION ====================
 async def aes_encrypt(payload, key, iv):
     cipher = AES.new(key, AES.MODE_CBC, iv)
     return cipher.encrypt(pad(payload, AES.block_size))
@@ -1472,7 +1468,7 @@ async def play_game(server_ip_port, thunder, sharma, udp_key, match_code,
 
 
 # ============================================================
-# 🔥 functional_br — TRUE Parallel Matches + DNS + TCP Keepalive + Anti-Fatigue
+# functional_br — Parallel Matches + Anti-Fatigue + Rate Limit + Target Stop
 # ============================================================
 async def functional_br(addrs, starter_packet, account_region, client_version,
                         key, iv, account_id="", account_data=None,
@@ -1547,7 +1543,6 @@ async def functional_br(addrs, starter_packet, account_region, client_version,
                 except Exception:
                     pass
 
-                # টিসিপি গেটওয়ে ব্যাকগ্রাউন্ড কিপ-অ্যালাইভ লুপ
                 async def gateway_keepalive_loop():
                     ka_data = await send_keep_alive(account_region)
                     while True:
@@ -1587,7 +1582,7 @@ async def functional_br(addrs, starter_packet, account_region, client_version,
                         print_error(f"start_game_battle_royale error: {e}")
                     last_start_time = asyncio.get_running_loop().time()
 
-                # 🎯 Target-Level Auto-Stop (loop start)
+                # 🎯 Target-Level Auto-Stop
                 if _target_reached(uid_str, target_level):
                     print_success(f"🎯 [TARGET] UID {uid_str} reached target level {target_level}. Stopping.")
                     try:
@@ -1624,10 +1619,9 @@ async def functional_br(addrs, starter_packet, account_region, client_version,
                 await send_start_match()
 
                 while True:
-                    # চলমান ব্যাকগ্রাউন্ড ম্যাচ পর্যবেক্ষণ
                     play_matches[:] = [m for m in play_matches if not m.done()]
 
-                    # 🎯 Target-Level Auto-Stop (loop check)
+                    # 🎯 Target-Level Auto-Stop (mid-loop)
                     if _target_reached(uid_str, target_level):
                         print_success(f"🎯 [TARGET] UID {uid_str} reached target level {target_level}. Stopping (mid-loop).")
                         try:
@@ -1736,7 +1730,6 @@ async def functional_br(addrs, starter_packet, account_region, client_version,
                                     f"UID active: {match_index} | Total: {total}"
                                 )
 
-                                # 🔥 আনলিমিটেড প্যারালাল ম্যাচ এক্সিকিউশন
                                 new_match = asyncio.create_task(
                                     play_game(
                                         server_ip_port,
@@ -1765,7 +1758,6 @@ async def functional_br(addrs, starter_packet, account_region, client_version,
                                 except Exception:
                                     pass
 
-                                # 🛑 স্মার্ট অ্যান্টি-ফ্যাটিগ রেস্ট লজিক
                                 if matches_queued_in_session >= FATIGUE_MATCH_THRESHOLD:
                                     rest_time = random.uniform(FATIGUE_REST_MIN, FATIGUE_REST_MAX)
                                     print_colored(
@@ -1973,7 +1965,6 @@ async def informational(addrs, starter_packet, key, iv, region="BD", max_reconne
 def _register_credentials(account_data: Dict):
     try:
         acc_id = str(account_data['account_id'])
-        # Owner lookup
         owner = None
         auth_uid = account_data.get('auth_uid')
         auth_token = account_data.get('auth_token')
@@ -2437,7 +2428,7 @@ async def main():
     print_info(f"Non-match Reconnect: {NON_MATCH_RECONNECT_DELAY}s")
     print_info(f"Cache Invalidation Threshold: {MAX_CONSECUTIVE_PARSE_FAILURES}x")
     print_info("Parallel Matches: UNLIMITED (background)")
-    print_info(f"Anti-Fatigue Break: Every {FATIGUE_MATCH_THRESHOLD} matches ({FATIGUE_MATCH_REST_MIN}s - {FATIGUE_REST_MAX}s)")
+    print_info(f"Anti-Fatigue Break: Every {FATIGUE_MATCH_THRESHOLD} matches ({FATIGUE_REST_MIN}s - {FATIGUE_REST_MAX}s)")
     print_info(f"Hourly Match Limit (per account): {HOURLY_MATCH_LIMIT}")
     print_info(f"Hourly Match Limit (global): {GLOBAL_HOURLY_MATCH_LIMIT}")
     print_info(f"Random Match Delay: {_min_delay_between_matches[0]:.1f}s - {_min_delay_between_matches[1]:.1f}s")
@@ -2573,7 +2564,6 @@ async def main():
 
     accounts = load_accounts()
 
-    # register owners before starting workers
     for acc in accounts:
         owner_uid = acc.get("owner_uid")
         if owner_uid:
