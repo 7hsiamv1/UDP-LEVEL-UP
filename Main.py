@@ -49,8 +49,6 @@ MODE_ID = 1
 MAP_ID = 1
 PRIORITY_REGIONS = ["BD", "IND", "SG", "TH", "PH", "VN", "MY", "ID", "HK", "TW"]
 
-_min_delay_between_matches = (3.0, 3.0)
-
 MAX_CONSECUTIVE_PARSE_FAILURES = 5.0
 NON_MATCH_RECONNECT_DELAY = 0.5
 
@@ -382,16 +380,6 @@ async def _get_match_count(uid: str) -> int:
 async def _get_total_match_count() -> int:
     async with _match_counter_lock:
         return sum(_match_counters.values())
-
-
-# ==================== TARGET-LEVEL ====================
-def _target_reached(uid_str: str, target_level: int) -> bool:
-    if not target_level or target_level <= 0:
-        return False
-    acc = bot_state.accounts.get(str(uid_str))
-    if not acc:
-        return False
-    return int(acc.get("level", 1)) >= int(target_level)
 
 
 # ==================== TOKEN CACHE ====================
@@ -1516,11 +1504,11 @@ async def play_game(server_ip_port, thunder, sharma, udp_key, match_code,
 
 
 # ============================================================
-# functional_br — lvl.py style (No Resting, No Hourly Limit)
+# functional_br — lvl.py এর হুবহু ম্যাচিং flow
 # ============================================================
 async def functional_br(addrs, starter_packet, account_region, client_version,
                         key, iv, account_id="", account_data=None,
-                        max_reconnects=10, target_level: int = 0):
+                        max_reconnects=10):
     reconnects = 0
     ip, port = addrs.split(":")
     play_matches: List[asyncio.Task] = []
@@ -1629,43 +1617,10 @@ async def functional_br(addrs, starter_packet, account_region, client_version,
                         print_error(f"start_game_battle_royale error: {e}")
                     last_start_time = asyncio.get_running_loop().time()
 
-                if _target_reached(uid_str, target_level):
-                    print_success(f"🎯 [TARGET] UID {uid_str} reached target level {target_level}. Stopping.")
-                    try:
-                        bot_state.update_status(uid_str, "TARGET_REACHED", 0)
-                    except Exception:
-                        pass
-                    if gw_ping_task:
-                        gw_ping_task.cancel()
-                    try:
-                        writer.close()
-                        await writer.wait_closed()
-                    except Exception:
-                        pass
-                    return
-
                 await send_start_match()
 
                 while True:
                     play_matches[:] = [m for m in play_matches if not m.done()]
-
-                    if _target_reached(uid_str, target_level):
-                        print_success(f"🎯 [TARGET] UID {uid_str} reached target level {target_level}. Stopping (mid-loop).")
-                        try:
-                            bot_state.update_status(uid_str, "TARGET_REACHED", len(play_matches))
-                        except Exception:
-                            pass
-                        for m in play_matches:
-                            if not m.done():
-                                m.cancel()
-                        if gw_ping_task:
-                            gw_ping_task.cancel()
-                        try:
-                            writer.close()
-                            await writer.wait_closed()
-                        except Exception:
-                            pass
-                        return
 
                     active_count = await _get_match_count(uid_str)
                     try:
@@ -1783,10 +1738,11 @@ async def functional_br(addrs, starter_packet, account_region, client_version,
                                 except Exception:
                                     pass
 
-                                # lvl.py style: শুধু ছোট offline delay — কোনো rest/hourly limit নেই
-                                rand_delay = random.uniform(*_min_delay_between_matches)
-                                print_info(f"[OFFLINE] {rand_delay:.1f}s offline → new StartMatch")
-                                await asyncio.sleep(rand_delay)
+                                print_info(
+                                    f"[OFFLINE] {NEW_MATCH_DELAY}s offline → "
+                                    f"reload token → new StartMatch"
+                                )
+                                await asyncio.sleep(NEW_MATCH_DELAY)
 
                                 reconnects = 0
                                 break
@@ -2332,8 +2288,7 @@ async def run_account_worker(account_data: Dict, label: str):
                 account_data['aes_ak'],
                 account_data['iv_i'],
                 account_id=acc_id,
-                account_data=account_data,
-                target_level=int(account_data.get("target_level", 0) or 0)
+                account_data=account_data
             )
         )
 
@@ -2445,7 +2400,6 @@ async def main():
     print_info(f"Non-match Reconnect: {NON_MATCH_RECONNECT_DELAY}s")
     print_info(f"Cache Invalidation Threshold: {MAX_CONSECUTIVE_PARSE_FAILURES}x")
     print_info("Parallel Matches: UNLIMITED (background)")
-    print_info(f"Random Match Delay: {_min_delay_between_matches[0]:.1f}s - {_min_delay_between_matches[1]:.1f}s")
     print_info(f"Cache TTL: {TOKEN_CACHE_TTL}s ({TOKEN_CACHE_TTL//60} min)")
     print_info(f"Priority Regions: {PRIORITY_REGIONS}")
     print_info("Device System: 1 ID = 1 Persistent Device ID (devices.json)")
@@ -2457,7 +2411,7 @@ async def main():
     except Exception as e:
         print_error(f"Could not start web dashboard: {e}")
 
-    # 🔥 Helper: robust worker cancellation
+    # Worker cancellation helper (fixes delete-but-worker-keeps-running bug)
     def _find_and_cancel_worker(uid: str) -> bool:
         if not uid:
             return False
