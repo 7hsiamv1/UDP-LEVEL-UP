@@ -41,26 +41,26 @@ TOKEN_CACHE_FILE = "token_cache.json"
 DEVICES_FILE = "devices.json"
 TOKEN_CACHE_TTL = 1200
 
-# 🔥 Match control
+# 🔥 Match control (FASTER)
 START_MATCH_INTERVAL = 3.0
-NEW_MATCH_DELAY = 10.0
+NEW_MATCH_DELAY = 3.0                    # আগে 10.0 ছিল → এখন 3.0 (faster)
 MAX_MATCH_DURATION = 1500
 MATCH_IDLE_TIMEOUT = 5.0
 MODE_ID = 1
 MAP_ID = 1
 PRIORITY_REGIONS = ["BD", "IND", "SG", "TH", "PH", "VN", "MY", "ID", "HK", "TW"]
 
-# 🛑 Anti-Fatigue System
-FATIGUE_MATCH_THRESHOLD = 8
-FATIGUE_REST_MIN = 240.0
-FATIGUE_REST_MAX = 420.0
+# 🛑 Anti-Fatigue (MODERATE — faster than before)
+FATIGUE_MATCH_THRESHOLD = 15             # আগে 8 ছিল → এখন 15 (কম rest)
+FATIGUE_REST_MIN = 120.0                 # আগে 240 → এখন 120s (2 min)
+FATIGUE_REST_MAX = 200.0                 # আগে 420 → এখন 200s (3.3 min)
 
-# ⏱️ Hourly rate limit
-HOURLY_MATCH_LIMIT = 12
-GLOBAL_HOURLY_MATCH_LIMIT = 40
-_min_delay_between_matches = (10.0, 22.0)
+# ⏱️ Hourly rate limit (HIGHER = faster)
+HOURLY_MATCH_LIMIT = 20                  # আগে 12 → এখন 20 (per account)
+GLOBAL_HOURLY_MATCH_LIMIT = 60           # আগে 40 → এখন 60 (global)
+_min_delay_between_matches = (4.0, 8.0)  # আগে (10, 22) → এখন (4, 8) (faster)
 
-# 🔥 Cache invalidation
+# 🔥 Cache invalidation thresholds
 MAX_CONSECUTIVE_PARSE_FAILURES = 5.0
 NON_MATCH_RECONNECT_DELAY = 0.5
 
@@ -154,7 +154,7 @@ def get_device_for_account(account_identifier: str) -> dict:
     return new_device
 
 
-# ==================== CLOUDFLARE DNS & SOCKET ====================
+# ==================== CLOUDFLARE DNS ====================
 CLOUDFLARE_PRIMARY_DNS = "1.1.1.1"
 CLOUDFLARE_SECONDARY_DNS = "1.0.0.1"
 _DNS_CACHE: Dict[str, Tuple[str, float]] = {}
@@ -163,7 +163,6 @@ _DNS_CACHE_TTL = 300.0
 async def resolve_host_cloudflare(hostname: str) -> str:
     if not hostname:
         return hostname
-
     parts = hostname.split('.')
     if len(parts) == 4 and all(p.isdigit() and 0 <= int(p) <= 255 for p in parts):
         return hostname
@@ -400,9 +399,8 @@ async def _get_total_match_count() -> int:
         return sum(_match_counters.values())
 
 
-# ==================== RATE LIMIT + TARGET-LEVEL HELPERS ====================
+# ==================== RATE LIMIT + TARGET-LEVEL ====================
 async def _check_hourly_limit(uid: str) -> Tuple[bool, float]:
-    """Returns (allowed, wait_seconds_if_blocked)."""
     now = time.time()
     hkey = str(int(now // 3600))
     async with _rate_lock:
@@ -626,7 +624,10 @@ async def decode_protobuf(data):
     parsed_results_dict = await parse_results(parsed_results)
     return json.dumps(parsed_results_dict)
 
-async def build_majorlogin_payload(open_id, access_token, platform, client_version, device_info=None, verr=None, region="BD"):
+
+# 🔥 NEW: build_majorlogin_payload with device_info injection (from lvl.py)
+async def build_majorlogin_payload(open_id, access_token, platform, client_version,
+                                    device_info=None, verr=None, region="BD"):
     try:
         if verr is None:
             verr = client_version
@@ -637,18 +638,20 @@ async def build_majorlogin_payload(open_id, access_token, platform, client_versi
         proto.client_version = str(verr)
         proto.client_version_code = "2019121229"
 
-        proto.system_software = "Android OS 15 / API-35 (AP3A.240905.015.A2/185014)"
-        proto.system_hardware = "Handheld"
-        proto.device_type = "Handheld"
-        proto.screen_width = 1600
-        proto.screen_height = 719
-        proto.screen_dpi = "234"
-        proto.processor_details = "ARM64 FP ASIMD AES | 1820 | 8"
-        proto.memory = 2798
-        proto.gpu_renderer = "Mali-G57"
+        # 🔥 Device Info Injection (fallback to defaults if not provided)
+        di = device_info or {}
+        proto.system_software = di.get("system_software", "Android OS 15 / API-35 (AP3A.240905.015.A2/185014)")
+        proto.system_hardware = di.get("brand", "Handheld")
+        proto.device_type = di.get("model", "Handheld")
+        proto.screen_width = int(di.get("screen_width", 1600))
+        proto.screen_height = int(di.get("screen_height", 719))
+        proto.screen_dpi = str(di.get("screen_dpi", "234"))
+        proto.processor_details = di.get("processor_details", "ARM64 FP ASIMD AES | 1820 | 8")
+        proto.memory = int(di.get("memory", 2798))
+        proto.gpu_renderer = di.get("gpu_renderer", "Mali-G57")
         proto.gpu_version = "OpenGL ES 3.2 v1.r49p1-04eac0.2848c17a2fd4e9340e06555168eaa3c9"
-        proto.unique_device_id = "Google|f744e396-5694-4e65-995d-97a958f2bd1f"
-        proto.client_ip = "197.0.137.129"
+        proto.unique_device_id = di.get("unique_device_id", "Google|f744e396-5694-4e65-995d-97a958f2bd1f")
+        proto.client_ip = di.get("client_ip", "197.0.137.129")
 
         proto.language = REGION_LANG.get(str(region).upper(), "en")
 
@@ -711,6 +714,8 @@ async def build_majorlogin_payload(open_id, access_token, platform, client_versi
     except Exception:
         return None
 
+
+# 🔥 NEW: send_majorlogin with multi-offset fallback (from lvl.py)
 async def send_majorlogin(data, release_version, server_url):
     try:
         url = f"{server_url}MajorLogin" if server_url.endswith('/') else f"{server_url}/MajorLogin"
@@ -723,6 +728,36 @@ async def send_majorlogin(data, release_version, server_url):
         if len(response_content) < 40:
             return None
 
+        # 1. Direct parse
+        res_proto = thunderFF_pb2.MajorLoginRes()
+        try:
+            res_proto.ParseFromString(response_content)
+            if res_proto.region and res_proto.token:
+                return res_proto
+        except Exception:
+            pass
+
+        # 2. OB55 64-byte header offset
+        if len(response_content) > 64:
+            try:
+                candidate = thunderFF_pb2.MajorLoginRes()
+                candidate.ParseFromString(response_content[64:])
+                if candidate.region and candidate.token:
+                    return candidate
+            except Exception:
+                pass
+
+        # 3. Dynamic offset search (0-128)
+        for offset in range(min(128, len(response_content))):
+            try:
+                candidate = thunderFF_pb2.MajorLoginRes()
+                candidate.ParseFromString(response_content[offset:])
+                if candidate.region and candidate.token:
+                    return candidate
+            except Exception:
+                pass
+
+        # 4. Fallback via Parser for key/iv extraction
         res_proto = thunderFF_pb2.MajorLoginRes()
         try:
             res_proto.ParseFromString(response_content)
@@ -750,32 +785,6 @@ async def send_majorlogin(data, release_version, server_url):
             try: iv_val = bytes.fromhex(iv_val)
             except Exception: pass
 
-        if not key_val or not iv_val:
-            for offset in range(min(128, len(response_content))):
-                try:
-                    candidate = thunderFF_pb2.MajorLoginRes()
-                    candidate.ParseFromString(response_content[offset:])
-                    if candidate.region and candidate.token:
-                        res_proto = candidate
-                        break
-                except Exception:
-                    pass
-            try:
-                parsed = Parser().parse(response_content.hex())
-                dict_res = await parse_results(parsed)
-                kv = get_proto_field(dict_res, 22)
-                ivv = get_proto_field(dict_res, 23)
-                if isinstance(kv, str):
-                    try: kv = bytes.fromhex(kv)
-                    except Exception: pass
-                if isinstance(ivv, str):
-                    try: ivv = bytes.fromhex(ivv)
-                    except Exception: pass
-                if kv: key_val = kv
-                if ivv: iv_val = ivv
-            except Exception:
-                pass
-
         if key_val:
             try: res_proto.aes_ak = key_val
             except Exception: pass
@@ -787,6 +796,8 @@ async def send_majorlogin(data, release_version, server_url):
     except Exception:
         return None
 
+
+# 🔥 NEW: send_getlogin with offset fallback (from lvl.py)
 async def send_getlogin(data, base_url, token, release_version):
     try:
         url = f"{base_url.rstrip('/')}/GetLoginData"
@@ -800,11 +811,26 @@ async def send_getlogin(data, base_url, token, release_version):
         response_content = response.content
 
         res_proto = thunderFF_pb2.GetLoginDataRes()
+        parsed_successfully = False
         try:
             res_proto.ParseFromString(response_content)
+            if res_proto.functional_addrs or res_proto.informational_addrs:
+                parsed_successfully = True
         except Exception:
             pass
 
+        if not parsed_successfully:
+            for offset in range(min(128, len(response_content))):
+                try:
+                    candidate = thunderFF_pb2.GetLoginDataRes()
+                    candidate.ParseFromString(response_content[offset:])
+                    if candidate.functional_addrs or candidate.informational_addrs:
+                        res_proto = candidate
+                        break
+                except Exception:
+                    pass
+
+        # Extra extraction for functional / informational addrs
         def _extract_addr(raw_bytes, field_no):
             try:
                 pos = 0
@@ -858,13 +884,14 @@ async def send_getlogin(data, base_url, token, release_version):
                 return None
 
         try:
-            for offset in range(0, min(80, len(response_content))):
-                fa = _extract_addr(response_content[offset:], 14)
-                ia = _extract_addr(response_content[offset:], 32)
-                if fa and ":" in fa and ia and ":" in ia:
-                    res_proto.functional_addrs = fa
-                    res_proto.informational_addrs = ia
-                    break
+            if not res_proto.functional_addrs or not res_proto.informational_addrs:
+                for offset in range(0, min(80, len(response_content))):
+                    fa = _extract_addr(response_content[offset:], 14)
+                    ia = _extract_addr(response_content[offset:], 32)
+                    if fa and ":" in fa and ia and ":" in ia:
+                        res_proto.functional_addrs = fa
+                        res_proto.informational_addrs = ia
+                        break
         except Exception:
             pass
 
@@ -879,6 +906,8 @@ async def send_getlogin(data, base_url, token, release_version):
     except Exception:
         return None
 
+
+# ==================== TCP STARTUP ====================
 async def build_tcp_startup_packet(account_id, token, server_time, key, iv, region="BD", typ='OnLine'):
     uid_hex = f"{int(account_id):016x}"
     timestamp_hex = f"{int(server_time):08x}"
@@ -903,6 +932,7 @@ async def send_keep_alive(region="BD"):
         return bytes.fromhex("0219")
 
 
+# ==================== START MATCH (BR MODE) ====================
 async def start_game_battle_royale(region, client_version, writer, key, iv):
     packet = bytes.fromhex("080112800a0a010110013a110a044944433110aa011a064555524f50453a100a044944433210311a064555524f504540014a0801090a0b1219202758016291090a8001303838463832424630324139363736373032303130313030303030303030303030303136303030313030313530303032323246393745454530463030303030303436373632353134303030303030303030303030303030303030303030303030303030303030303030303030303066663030303030303030636163666131366410241afb02735d5e571400024a775d45414d1a041b1c001f11010449715f4243481a001e1d071c1703004b1a4066785c524570735c51486775421b5c5a4c07504042685a63610816054e19025e75196001477c015165406370195f5547404e4550640103020f1304064863754268676c755f65576e40467e5f0a417a4701026d675d6e73670b1108495a4c6a0b78470b740065645e525a057258425f584a447d4e6759440c11044e7c596d7f4b625f7d04055a47505c4e1d6b5b4107447d7201057d7f0f14084e430457674f7e517d72015172415d027473577c4d615f79535256780911030f4d5e027a797f614165067806505d53777750475e75064257076500460817014e741e7e5078487e7a7c465e7669767153497064605a7376677773550d160148037e18675966787f4c42607a645f577e7b441b460776026b18685d0b110205490060020f70676175654674706671797f41067346677c4e06585e780f15074c57047b40517075415f6364027259674b5b0166407f7340600407770a22047a5d5c52300b3a0a167305067162727516134208312e3133302e3232480350015ae90403626253513635686e556f4e36416456324b796f566c636f477776484f624e56526c4d727073504b4f43654177616848494176795556497273743752737149734a7a786b3247525268377a2f637664626d504f6a73552f79626d38547a4c69586d2f474351696d494b53486833447955726f39515152756c34545350626d6d624b7949565937545671577059455372323646572f59624578507338514f706d317372785455736c30796a434144444d4f34616a654b615753366361496c554b4963797a494e396d52516f715277687939797257476d337a644345337a6a61436f492f5a585233656f65365a42647a64677654636b6b665733356e4d4c6a6a565072564b6433523172756174394e50514150724a5546627859696c4c5a3859707336654d5447666b6649793574666a526c314d4648706b51774c6373374439656378566c41636f374e664f6d2b30654756466c4434744478706771385533595973587645384842502f70666c767a737138316a32524f4d7857437556445442492f684735625462773166456e4249725162762b636144775147696f74554e316d4c4b77734379456f4766706746614251457645672b736a764c4c78704743334c304a5344532f74526169504354553344374e6249306547516651622f5a466f4c36455630775a324d6f583932414c572f5049752f56634663584e70596b356f7966326151416a536971486a2f363276354843644f525551303578754e6171795251625653704654303137655237675255636b4966366c6f447476342b514e4a4670766d74757077707774396a5a5974437a4b56743657726d6e36785837706658456251555434684f3758a201050803108703a201050804108103a20105080510c001a20105081d10cc01a2010408161078a20105080e10af01a201020815")
     proto = thunderFF_pb2.StartMatch()
@@ -925,6 +955,8 @@ async def start_game_battle_royale(region, client_version, writer, key, iv):
     writer.write(bytes.fromhex(final_packet))
     await writer.drain()
 
+
+# ==================== TEA + FRAME BUILDING ====================
 async def has_ssan_zig(n):
     z = (n << 1) & 0xFFFFFFFFFFFFFFFF
     out = bytearray()
@@ -1352,9 +1384,7 @@ async def play_game(server_ip_port, thunder, sharma, udp_key, match_code,
                         ptype = await classify(frame)
 
                         if frame['cmd'] in [103, 107]:
-                            print_success(
-                                f"[MATCH #{match_index}] Completed (cmd {frame['cmd']})"
-                            )
+                            print_success(f"[MATCH #{match_index}] Completed (cmd {frame['cmd']})")
                             completed_cleanly = True
                             local_closed = True
                             continue
@@ -1372,9 +1402,7 @@ async def play_game(server_ip_port, thunder, sharma, udp_key, match_code,
 
                         if ptype in ["ACK", "PING", "HELLO", "JOIN_MATCH"]:
                             if ptype == "HELLO" and ack_state == "waiting_for_hello_reply":
-                                typ, reply = await reply_for(
-                                    frame, udp_key_bytes, match_code, ack_style="short"
-                                )
+                                typ, reply = await reply_for(frame, udp_key_bytes, match_code, ack_style="short")
                                 if reply:
                                     await loop.sock_sendto(sock, reply, server_addr)
                                 ack_state = "ack_sent_waiting"
@@ -1405,9 +1433,7 @@ async def play_game(server_ip_port, thunder, sharma, udp_key, match_code,
                 elif ack_state == "waiting_for_hello_reply":
                     if (time.time() - last_activity) > MAX_IDLE_BEFORE_HELLO_RESEND:
                         try:
-                            pkt = await build_hello_packet(
-                                f"{account_id}_2585", udp_key_bytes, match_code
-                            )
+                            pkt = await build_hello_packet(f"{account_id}_2585", udp_key_bytes, match_code)
                             await loop.sock_sendto(sock, bytes.fromhex(pkt), (resolved_ip, port))
                         except Exception:
                             pass
@@ -1457,10 +1483,7 @@ async def play_game(server_ip_port, thunder, sharma, udp_key, match_code,
                 pass
         remaining = await _dec_match(uid_str)
         total = await _get_total_match_count()
-        print_info(
-            f"[MATCH #{match_index}] Closed. "
-            f"UID active: {remaining} | Total active: {total}"
-        )
+        print_info(f"[MATCH #{match_index}] Closed. UID active: {remaining} | Total active: {total}")
         try:
             bot_state.update_status(uid_str, "IN_MATCH" if remaining > 0 else "ONLINE", remaining)
         except Exception:
@@ -1761,8 +1784,7 @@ async def functional_br(addrs, starter_packet, account_region, client_version,
                                 if matches_queued_in_session >= FATIGUE_MATCH_THRESHOLD:
                                     rest_time = random.uniform(FATIGUE_REST_MIN, FATIGUE_REST_MAX)
                                     print_colored(
-                                        f"☕ [REST] একটানা {matches_queued_in_session}টি ম্যাচ শুরু হয়েছে। "
-                                        f"বট ডিটেকশন এড়াতে {rest_time:.1f}s নতুন ম্যাচ খোঁজা বন্ধ রাখা হচ্ছে...",
+                                        f"☕ [REST] {matches_queued_in_session}টি ম্যাচ শেষ। Anti-ban বিরতি {rest_time:.1f}s...",
                                         Colors.WARNING
                                     )
                                     try:
@@ -1773,10 +1795,7 @@ async def functional_br(addrs, starter_packet, account_region, client_version,
                                     matches_queued_in_session = 0
                                 else:
                                     rand_delay = random.uniform(*_min_delay_between_matches)
-                                    print_info(
-                                        f"[OFFLINE] {rand_delay:.1f}s offline → "
-                                        f"reload token → new StartMatch"
-                                    )
+                                    print_info(f"[OFFLINE] {rand_delay:.1f}s offline → new StartMatch")
                                     await asyncio.sleep(rand_delay)
 
                                 reconnects = 0
@@ -2059,8 +2078,11 @@ async def process_account_uid_pass(uid: str, password: str, intended_region="BD"
 
         open_id, access_token, platform = tokengrant_response
 
+        # 🔥 Persistent device injection
+        device_info = get_device_for_account(uid)
+
         login_payload_data = await build_majorlogin_payload(
-            open_id, access_token, platform, client_version, None, region=intended_region
+            open_id, access_token, platform, client_version, device_info, region=intended_region
         )
         if login_payload_data is None:
             print_error(f"Failed to build login payload for UID {uid}")
@@ -2183,8 +2205,11 @@ async def process_account_token(access_token: str, intended_region="BD",
         if not open_id:
             return None
 
+        # 🔥 Persistent device injection (using open_id as key)
+        device_info = get_device_for_account(open_id)
+
         login_payload_data = await build_majorlogin_payload(
-            open_id, access_token, str(platform), client_version, None, region=intended_region
+            open_id, access_token, str(platform), client_version, device_info, region=intended_region
         )
         if not login_payload_data:
             return None
@@ -2398,7 +2423,6 @@ async def account_loop_token(token: str, region="BD", owner_uid=None, target_lev
 
 
 # ==================== ACCOUNTS LOADER ====================
-
 def load_accounts():
     accounts = []
     if os.path.exists(ACCOUNTS_FILE):
@@ -2417,7 +2441,6 @@ def load_accounts():
 
 
 # ==================== MAIN ====================
-
 async def main():
     print_colored("=" * 60, Colors.CYAN)
     print_colored("    7H SIAM - FreeFire Level Up Bot (Web Dashboard Mode)", Colors.GREEN)
