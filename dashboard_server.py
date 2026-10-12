@@ -42,7 +42,8 @@ class BotState:
         self.account_owners: Dict[str, str] = {}
 
     def set_owner(self, auth_key: str, owner_uid: str):
-        self.account_owners[str(auth_key)] = str(owner_uid)
+        if auth_key and owner_uid:
+            self.account_owners[str(auth_key)] = str(owner_uid)
 
     def get_owner(self, auth_uid: str = "", auth_token: str = "") -> Optional[str]:
         if auth_uid and str(auth_uid) in self.account_owners:
@@ -51,6 +52,43 @@ class BotState:
             key = f"tok_{str(auth_token)[:20]}"
             if key in self.account_owners:
                 return self.account_owners[key]
+        return None
+
+    def _infer_owner_from_text(self, message: str) -> Optional[Tuple[str, str]]:
+        """
+        Scans a log message for a known FreeFire UID or auth-key and returns
+        (matched_key, owner_uid) if found. Used to auto-attach owner_uid to
+        logs that don't explicitly pass a uid.
+        """
+        if not message:
+            return None
+        msg = str(message)
+        # 1) Check against registered FreeFire accounts (preferred – longest key first)
+        try:
+            candidates = sorted(self.accounts.keys(), key=lambda k: len(str(k)), reverse=True)
+        except Exception:
+            candidates = list(self.accounts.keys())
+        for acc_uid in candidates:
+            k = str(acc_uid)
+            if not k or len(k) < 6:
+                continue
+            if k in msg:
+                owner = self.accounts.get(acc_uid, {}).get("owner_uid")
+                if owner:
+                    return (k, owner)
+        # 2) Check against auth-key registry (uid or tok_xxx)
+        try:
+            owner_keys = sorted(self.account_owners.keys(), key=lambda k: len(str(k)), reverse=True)
+        except Exception:
+            owner_keys = list(self.account_owners.keys())
+        for ak in owner_keys:
+            k = str(ak)
+            if not k or len(k) < 6:
+                continue
+            if k in msg:
+                owner = self.account_owners.get(ak)
+                if owner:
+                    return (k, owner)
         return None
 
     def log(self, message: str, level: str = "info", uid: Optional[str] = None):
@@ -62,8 +100,24 @@ class BotState:
             "owner_uid": None,
             "ts": time.time(),
         }
-        if uid and str(uid) in self.accounts:
-            entry["owner_uid"] = self.accounts[str(uid)].get("owner_uid")
+
+        # ---- 1) Direct uid provided ----
+        if uid:
+            uid_s = str(uid)
+            if uid_s in self.accounts:
+                entry["owner_uid"] = self.accounts[uid_s].get("owner_uid")
+            elif uid_s in self.account_owners:
+                entry["owner_uid"] = self.account_owners[uid_s]
+
+        # ---- 2) Auto-infer owner from message text ----
+        if not entry["owner_uid"]:
+            inferred = self._infer_owner_from_text(message)
+            if inferred:
+                matched_key, owner = inferred
+                entry["owner_uid"] = owner
+                if not entry["uid"]:
+                    entry["uid"] = matched_key
+
         self.logs.append(entry)
         if len(self.logs) > self.max_logs:
             self.logs.pop(0)
@@ -101,6 +155,9 @@ class BotState:
             acc["likes"] = likes
             acc["status"] = "ONLINE"
             acc["last_updated"] = time.strftime("%H:%M:%S")
+        # Register owner so future logs auto-attach
+        if owner_uid:
+            self.set_owner(uid_str, owner_uid)
         self.recalc_totals()
 
     def update_exp(self, uid: str, current_exp: int, level: Optional[int] = None):
@@ -246,6 +303,36 @@ def _filter_accounts_for_user(user: Dict[str, Any]) -> List[Dict[str, Any]]:
     return [a for a in bot_state.accounts.values() if a.get("owner_uid") == uid]
 
 
+def _filter_logs_for_user(user: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Return logs visible to this user.
+    A log is visible if:
+      - its owner_uid matches user.uid, OR
+      - the log has NO owner_uid AND the message references any of
+        the user's own FreeFire account UIDs (fallback).
+    """
+    uid = user["uid"]
+    # Build set of this user's FreeFire UIDs for fallback matching
+    own_uids = {str(a.get("uid")) for a in bot_state.accounts.values()
+                if a.get("owner_uid") == uid and a.get("uid")}
+    own_uids.discard("")
+    own_uids.discard("None")
+
+    out: List[Dict[str, Any]] = []
+    for l in bot_state.logs:
+        if l.get("owner_uid") == uid:
+            out.append(l)
+            continue
+        # Fallback: unowned log mentioning one of the user's UIDs
+        if not l.get("owner_uid") and own_uids:
+            msg = str(l.get("message", ""))
+            for u in own_uids:
+                if len(u) >= 6 and u in msg:
+                    out.append(l)
+                    break
+    return out
+
+
 async def handle_get_stats(request: web.Request) -> web.Response:
     user = request["user"]
     if is_admin(user):
@@ -253,7 +340,7 @@ async def handle_get_stats(request: web.Request) -> web.Response:
         logs = bot_state.logs[-120:]
     else:
         accounts_data = _filter_accounts_for_user(user)
-        logs = [l for l in bot_state.logs if l.get("owner_uid") == user["uid"]][-80:]
+        logs = _filter_logs_for_user(user)[-80:]
 
     accounts_data.sort(key=lambda x: x.get("gained_exp", 0), reverse=True)
     return web.json_response({
@@ -320,7 +407,7 @@ async def handle_add_account(request: web.Request) -> web.Response:
         entry_meta["added_at"] = int(time.time())
         await fb_set(f"user_accounts/{user['uid']}/{safe_key}", entry_meta, id_token)
 
-        bot_state.log(f"New account added: {data.get('uid') or 'Token'}", "success")
+        bot_state.log(f"New account added: {data.get('uid') or 'Token'}", "success", str(auth_key))
 
         if "on_account_added" in bot_state.refresh_callbacks:
             asyncio.create_task(bot_state.refresh_callbacks["on_account_added"]({**data, "owner_uid": user["uid"], "target_level": target_level, "region": region}))
@@ -344,7 +431,6 @@ async def handle_delete_account(request: web.Request) -> web.Response:
             with open(accounts_file, "r", encoding="utf-8") as f:
                 existing = json.load(f) or []
 
-        # Only owner or admin can delete
         def is_owned(entry):
             if is_admin(user):
                 return True
@@ -441,7 +527,6 @@ async def handle_admin_overview(request: web.Request) -> web.Response:
     if not is_admin(user):
         return web.json_response({"status": "error", "error": "Admin only"}, status=403)
 
-    # Group by owner
     owners: Dict[str, Dict[str, Any]] = {}
     for a in bot_state.accounts.values():
         owner = a.get("owner_uid") or "unknown"
